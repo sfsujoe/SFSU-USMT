@@ -21,7 +21,7 @@ This is the maintained project record, not an approved procedure for performing 
 - Important new findings: the x64 Config.xml disables the Office 16 parent and nests browser entries beneath it; browser detection uses old installation assumptions; the x86 folder lacks XML requested by standard commands; ARM64 binaries are not selected by the scripts; Fast changes collection/restore policy and can return to the standard Scripts path. Shared folders and fixed-drive document searches broaden scope beyond the selected profile.
 - Project workflow setup is complete: this runbook, AGENTS.md, and the project-local start-chat/chat-closeout skills are installed. Skill content, metadata structure, and project links were checked. Skill discovery in a fresh chat has not yet been user-tested.
 - Git was initialized at the user's request on 2026-10-23. The initial local branch is `main`; origin is [sfsujoe/SFSU-USMT](https://github.com/sfsujoe/SFSU-USMT.git). Repository-local author identity uses the name/email supplied by the user. The identity was not set globally.
-- Before initialization, successful `git ls-remote` checks returned no HEAD or branch refs from origin. There was no existing remote history to integrate. This verifies read access at that time, not GitHub write access. No push has been requested or performed; upstream tracking remains unset until a first approved publication.
+- Before initialization and again before the first push, successful `git ls-remote` checks returned no HEAD or branch refs from origin. There was no existing remote history to integrate. The user subsequently authorized publication, and the initial commit `e50aa54` was successfully pushed on 2026-10-23. GitHub write access is now confirmed; main tracks origin/main.
 - The initial local baseline comprises README.md, .gitignore, AGENTS.md, this runbook, the workflow review, and both skills plus their UI metadata. The ignored reference archive is excluded. Use Git history for the initial commit identifier; it is not embedded in its own runbook snapshot.
 
 ## Recommended next steps
@@ -50,6 +50,7 @@ Optional next UI experiment: show simulated progress and stage indicators. Progr
 | D08 | 2026-10-23 | At closeout, ask whether project changes should be committed and pushed to https://github.com/sfsujoe/SFSU-USMT.git. Prepare the runbook and change summary first; publish only after the user's answer authorizes it. | User supplied the repository URL and requested the closeout question. |
 | D09 | 2026-10-23 | Move the original scripts and mock-up into a separate reference folder and ignore it in Git. | User requested cleanup and local preservation. Implemented as `archive/legacy-and-mockup/`, including the mock-up logo so it remains beside the script. Future reuse is undecided. |
 | D10 | 2026-10-23 | Initialize local Git, connect origin to the supplied GitHub repository, and make the first local commit. | User request; user supplied the author name/email. Remote advertised no existing refs, so main was selected as the initial local branch. This request does not include pushing. |
+| D11 | 2026-10-23 | Publish the initial baseline to GitHub and set main's upstream. | User explicitly requested the push after the local commit. The initial push succeeded; future publication continues to follow the closeout confirmation workflow. |
 
 ## Milestones
 
@@ -62,7 +63,8 @@ Optional next UI experiment: show simulated progress and stage indicators. Progr
 | Establish runbook and chat skills | Complete, 2026-10-23 | Runbook, AGENTS.md, and both project-local skills installed; content and relative links checked. Fresh-chat discovery remains to be user-tested. |
 | Clean up local project directory | Complete, 2026-10-23 | Moved 13 original/prototype/asset files to a Git-ignored reference folder; contents verified unchanged; current file links and project instructions updated. |
 | Inspect expanded deployed toolkit | Complete, 2026-10-23, static review only | Inventory/version/architecture checks, source comparisons, XML and script parsing, rule tracing, and two historical log reviews documented in docs/CURRENT-WORKFLOW-REVIEW.md. No migrations run. |
-| Establish initial Git baseline | Included in the commit containing this entry | Local main branch, configured origin and author, nine documentation/skill files, and verified archive exclusion. GitHub publication is pending user authorization. |
+| Establish initial Git baseline | Complete, 2026-10-23 | Commit e50aa54 on local main; configured origin and author, nine documentation/skill files, and verified archive exclusion. |
+| First GitHub publication | Complete, 2026-10-23 | User-authorized push of e50aa54 succeeded; main tracks origin/main. The reference archive remains excluded. |
 | Integrate USMT and production checks | Not started | Requires agreed coverage/workflow, resolution of the configuration findings, and designated test data. |
 | Pilot and deploy replacement workflow | Not started | Requires successful backup/restore tests and policy compatibility checks. |
 
@@ -132,7 +134,7 @@ The following findings came from source review. They are not implemented fixes.
 - Local cleanup: all 13 moved files matched their pre-move SHA-256 hashes and no longer existed at their old root locations. No script contents were edited or executed as part of this move. `.gitignore` was added for the archive; Git ignore behavior is not yet exercised in this project because it has no Git metadata.
 - Expanded snapshot review: all 23 XML files were well-formed, all 10 PS1 files parsed, and all 10 deployed standard files matched the earlier copies. Twelve primary EXEs and sampled core DLLs report product version 10.0.26100.1; PE machine fields match the folder architectures. Three ScanState signatures checked Valid. MigXML.xsd diagnostics and runtime limits are documented in the detailed review. No binary or migration script was executed.
 - The two supplied historical logs show an incomplete ScanState generation command (code 11) and a successful UsmtUtils extraction (code 0), not a normal end-to-end migration. No employee identifiers or raw personal paths were copied into the tracked project records.
-- Git setup: repository initialized on main, origin URL checked, local author identity confirmed, and `git check-ignore -v` verified that representative legacy scripts, binaries, and logs in the archive are excluded. Initial commit review covers documentation/skill changes only; no migration-runtime tests are applicable to this baseline. Remote read access succeeded; write access remains untested.
+- Git setup: repository initialized on main, origin URL checked, local author identity confirmed, and `git check-ignore -v` verified that representative legacy scripts, binaries, and logs in the archive are excluded. Initial commit review covers documentation/skill changes only; no migration-runtime tests are applicable to this baseline. Remote read access and the subsequent user-authorized initial push both succeeded, confirming write access.
 
 ## Open questions
 
@@ -143,7 +145,7 @@ The following findings came from source review. They are not implemented fixes.
 - Which restore targets are required: same domain account, renamed domain account, existing local account, or a newly created local account?
 - Should local admin membership remain available, and how should account enablement and BitLocker follow-up be handled?
 - What backup retention, encryption, key handling, access permissions, and completion criteria should apply?
-- Who owns releases? Local Git is now configured on main with the supplied origin. Before the first approved push, recheck remote refs for intervening work and confirm authentication/write access, then set upstream tracking as part of publication.
+- Who owns releases? Local main now tracks origin/main and the first publication succeeded. Continue checking remote history and obtaining the user's publication decision during future closeouts.
 
 ## Chat workflow
 
@@ -183,6 +185,12 @@ The following findings came from source review. They are not implemented fixes.
 - Added a root README describing the project records, chat skills, and local-only archive. Updated the runbook and project instructions to reflect Git setup.
 - The initial baseline contains nine documentation/skill files. Representative archive paths were confirmed ignored; source tools, migration stores, logs, and the UI prototype are outside the commit scope.
 - No GitHub push or deployment was requested or performed. The commit identifier is available from Git history after this baseline is committed.
+
+### 2026-10-23 - First GitHub push
+
+- The user explicitly requested publication of the initial commit. Rechecked the clean local main branch, origin URL, and remote refs before publishing.
+- `git push --set-upstream origin main` succeeded for initial commit e50aa54 and configured main to track origin/main. GitHub write access is confirmed.
+- Updated this runbook to record the authorization and successful first publication. The reference archive is still excluded, and no migration or share deployment occurred.
 
 ## Reference links
 
