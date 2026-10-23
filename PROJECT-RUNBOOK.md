@@ -1,0 +1,198 @@
+# SFSU USMT project runbook
+
+Last updated: 2026-10-23 (America/Los_Angeles)
+
+## Project purpose
+
+Improve the technician workflow for backing up and restoring employee files and settings before computer re-imaging or replacement. The existing toolchain wraps Windows User State Migration Tool (USMT). The intended experience has one clear entry point that guides the technician through Backup or Restore.
+
+This is the maintained project record, not an approved procedure for performing a production migration. Keep current state and next steps near the top; preserve concise decision and session history below.
+
+## Current state and handoff
+
+- Phase: discovery; the original toolkit and UI prototype have been archived for reference. No active replacement implementation or production migration integration exists yet.
+- The preserved Windows Forms mock-up is [Migration-Wizard-Mockup.ps1](archive/legacy-and-mockup/Migration-Wizard-Mockup.ps1), launched by [Migration-Wizard-Mockup.cmd](archive/legacy-and-mockup/Migration-Wizard-Mockup.cmd). All 10 original files, both mock-up files, and the logo PNG are together in `archive/legacy-and-mockup/`.
+- The mock-up has Backup/Restore choices, a working folder picker, editable network path, Back/Next navigation, a review screen, and a demo completion message. It does not run USMT, enumerate employee profiles, validate network access, or copy migration data.
+- The user reported that the initial launcher was blocked. Adding process-scoped `-ExecutionPolicy Bypass` resolved that on the computer they tested. The cause of the original block was not independently diagnosed; no organization-wide compatibility claim has been established.
+- The header now uses SFSU purple `#442C8B`, gold `#FFD24F`, and the supplied white PNG logo. The Next button also uses the purple. The user approved the appearance.
+- Original script and prototype contents are unchanged; 13 files were relocated locally on 2026-10-23 and verified against their pre-move SHA-256 hashes. No production migrations, network-share cleanup, or deployment have been performed by Codex.
+- [.gitignore](.gitignore) excludes `/archive/legacy-and-mockup/`. This is a local preservation folder, not a Git-backed archive: its contents will not be included in a future push or fresh clone unless the user later changes that decision. No files were deleted. The mock-up's sibling launcher/logo paths remain intact. The user subsequently supplied the deployed Scripts, Scripts-Fast, USMT32, USMT64, arm64, and a standalone restore workaround; these remain reference inputs, not an approved executable migration package.
+- The expanded archive was reviewed on 2026-10-23: 580 files, 23 XML, and 12 executables. The main executables in all three architectures report `10.0.26100.1`. Deployed Scripts matches the previously reviewed 10 files exactly. Detailed evidence and coverage findings are in [CURRENT-WORKFLOW-REVIEW.md](docs/CURRENT-WORKFLOW-REVIEW.md).
+- Important new findings: the x64 Config.xml disables the Office 16 parent and nests browser entries beneath it; browser detection uses old installation assumptions; the x86 folder lacks XML requested by standard commands; ARM64 binaries are not selected by the scripts; Fast changes collection/restore policy and can return to the standard Scripts path. Shared folders and fixed-drive document searches broaden scope beyond the selected profile.
+- Project workflow setup is complete: this runbook, AGENTS.md, and the project-local start-chat/chat-closeout skills are installed. Skill content, metadata structure, and project links were checked. Skill discovery in a fresh chat has not yet been user-tested.
+- Git was initialized at the user's request on 2026-10-23. The initial local branch is `main`; origin is [sfsujoe/SFSU-USMT](https://github.com/sfsujoe/SFSU-USMT.git). Repository-local author identity uses the name/email supplied by the user. The identity was not set globally.
+- Before initialization, successful `git ls-remote` checks returned no HEAD or branch refs from origin. There was no existing remote history to integrate. This verifies read access at that time, not GitHub write access. No push has been requested or performed; upstream tracking remains unset until a first approved publication.
+- The initial local baseline comprises README.md, .gitignore, AGENTS.md, this runbook, the workflow review, and both skills plus their UI metadata. The ignored reference archive is excluded. Use Git history for the initial commit identifier; it is not embedded in its own runbook snapshot.
+
+## Recommended next steps
+
+These are proposed follow-ups, not permission to perform migrations or deploy changes.
+
+1. Agree on the real Backup and Restore screen flows: employee/profile selection, account mapping, storage selection, prerequisites, result handling, and post-restore tasks.
+2. Review the now-documented [deployed configuration findings](docs/CURRENT-WORKFLOW-REVIEW.md) with the team. Confirm why Office/browser exclusions exist and whether selected-profile, shared-folder, and fixed-drive document coverage is intended. Binary versions and static rule contents are now known; actual migration coverage still needs runtime tests.
+3. Choose a production packaging and release approach. A script-based network toolkit with one launcher is the current recommendation; an executable has not been selected or ruled out.
+4. Define backup identities and metadata, overwrite protection, log locations, verification, and retention before implementing data operations.
+5. Implement migration integration incrementally against designated test profiles and stores, then validate on representative restricted computers before production rollout.
+
+Optional next UI experiment: show simulated progress and stage indicators. Progress bars, animation, and elapsed time were discussed; none has been implemented or requested for implementation yet.
+
+## Confirmed decisions and constraints
+
+| ID | Date | Decision or constraint | Basis |
+| --- | --- | --- | --- |
+| D01 | 2026-10-23 | Work is based on a network share. Technicians currently enter its Scripts folder and launch SCANSTATE-LAUNCHER.bat or LOADSTATE-LAUNCHER.bat. | User description and directory screenshot. |
+| D02 | 2026-10-23 | Aim for one guided Backup/Restore entry point. The current directory structure can be reconsidered. | User request; no final replacement structure approved. |
+| D03 | 2026-10-23 | Some computers have strict execution controls. A self-contained executable may face team acceptance and policy hurdles. | User constraint; exact policies remain unknown. |
+| D04 | 2026-10-23 | Build a UI-only PowerShell wizard first, including a functional directory picker. | User request; implemented. |
+| D05 | 2026-10-23 | Launch the mock-up using process-scoped `-ExecutionPolicy Bypass`; do not change saved machine/user execution policy. | User requested the change and reported it worked. This is a prototype launch decision, not a production policy decision. |
+| D06 | 2026-10-23 | Use `#442C8B` and `#FFD24F` in the header and the supplied PNG logo. | User specified the colors and asset; implementation accepted. |
+| D07 | 2026-10-23 | Maintain a project runbook and provide start-chat and chat-closeout skills for continuity. | User request. |
+| D08 | 2026-10-23 | At closeout, ask whether project changes should be committed and pushed to https://github.com/sfsujoe/SFSU-USMT.git. Prepare the runbook and change summary first; publish only after the user's answer authorizes it. | User supplied the repository URL and requested the closeout question. |
+| D09 | 2026-10-23 | Move the original scripts and mock-up into a separate reference folder and ignore it in Git. | User requested cleanup and local preservation. Implemented as `archive/legacy-and-mockup/`, including the mock-up logo so it remains beside the script. Future reuse is undecided. |
+| D10 | 2026-10-23 | Initialize local Git, connect origin to the supplied GitHub repository, and make the first local commit. | User request; user supplied the author name/email. Remote advertised no existing refs, so main was selected as the initial local branch. This request does not include pushing. |
+
+## Milestones
+
+| Milestone | Status | Evidence or remaining work |
+| --- | --- | --- |
+| Review existing scripts | Complete, 2026-10-23 | All 10 original files inspected without executing migration operations. Findings documented below. |
+| Compare packaging approaches | Complete, 2026-10-23 | Discussed executable versus script toolkit on a network share. Final packaging decision remains open. |
+| Build UI prototype | Complete, 2026-10-23 | Three-step wizard with folder picker and review. User confirmed it launched after Bypass was added. |
+| Apply SFSU branding | Complete, 2026-10-23 | User colors and logo integrated; header rendering inspected; user accepted appearance. |
+| Establish runbook and chat skills | Complete, 2026-10-23 | Runbook, AGENTS.md, and both project-local skills installed; content and relative links checked. Fresh-chat discovery remains to be user-tested. |
+| Clean up local project directory | Complete, 2026-10-23 | Moved 13 original/prototype/asset files to a Git-ignored reference folder; contents verified unchanged; current file links and project instructions updated. |
+| Inspect expanded deployed toolkit | Complete, 2026-10-23, static review only | Inventory/version/architecture checks, source comparisons, XML and script parsing, rule tracing, and two historical log reviews documented in docs/CURRENT-WORKFLOW-REVIEW.md. No migrations run. |
+| Establish initial Git baseline | Included in the commit containing this entry | Local main branch, configured origin and author, nine documentation/skill files, and verified archive exclusion. GitHub publication is pending user authorization. |
+| Integrate USMT and production checks | Not started | Requires agreed coverage/workflow, resolution of the configuration findings, and designated test data. |
+| Pilot and deploy replacement workflow | Not started | Requires successful backup/restore tests and policy compatibility checks. |
+
+## Project files and operating context
+
+Local development folder: `C:/Users/909272551/src/USMTScripts`.
+
+The screenshot showed `V:` mapped to the `backup$` share on `qml.ad.sfsu.edu`, inside `Migration v2`. Its visible folders were `arm64`, `Completed`, `Logs`, `Migration_Data`, `Scripts`, `Scripts-Fast`, `USMT32`, and `USMT64`. It also showed a migration ZIP, a troubleshooting BAT, marker/instruction text files, and `.DS_Store`. This is a screenshot inventory, not a live audit or authority to delete anything. The exact UNC deployment path and permissions should be confirmed before implementation.
+
+### Archived prototype (local reference only)
+
+- [Migration-Wizard-Mockup.cmd](archive/legacy-and-mockup/Migration-Wizard-Mockup.cmd): starts Windows PowerShell with `-NoLogo -NoProfile -STA -ExecutionPolicy Bypass`, resolves the PS1 relative to the launcher, and keeps startup errors visible.
+- [Migration-Wizard-Mockup.ps1](archive/legacy-and-mockup/Migration-Wizard-Mockup.ps1): Windows Forms UI. Typed paths are deliberately accepted without network validation. The picker selects existing folders and does not offer creation of a new folder.
+- Logo: `documents_d7be78a49a8_be78a49a8fc_SFSU Identity_Primary_White_rgb_1743527167975_2500x2500.png`. The decoded image is 1401 x 1401 pixels despite its filename. Keep it beside the PS1; loading is relative to `$PSScriptRoot`. The image is cloned to avoid locking the supplied file, and disposed when the form closes. A missing/unreadable logo does not intentionally prevent the wizard from opening.
+
+### Legacy toolchain
+
+All files in this table now live in `archive/legacy-and-mockup/`. They are preserved unchanged as references; their prior production layout is described for context, not recreated by this local archive.
+
+| File | Purpose |
+| --- | --- |
+| SCANSTATE-LAUNCHER.bat | Starts registry-sid.ps1. |
+| registry-sid.ps1 | Lists profiles, prompts for a selection, stores its SID, and calls scan.bat. |
+| scan.bat | Copies Downloads separately, then invokes ScanState. |
+| LOADSTATE-LAUNCHER.bat | Starts loadstate.ps1. |
+| loadstate.ps1 | Lists migration folders and routes to domain or local restore. |
+| load.bat | Domain restore, separate Downloads copy, optional local admin addition, and closing reminders. |
+| load-local.bat | Local-account restore using /lac, separate Downloads copy, and account-enablement reminder. |
+| locadmin.ps1 | Adds an SFSU account to the local Administrators group. |
+| dload-exclude.txt | XCOPY exclusion strings intended to omit EXE/MSI files from Downloads. |
+| load - Copy.bat | Experimental domain restore variant referencing ExcludeSystemFolders2.xml; comments identify Dropbox-exclusion testing. |
+
+The scripts expect sibling USMT32/USMT64, Migration_Data, Logs, and XML files such as config.xml and ExcludeSystemFolders.xml. The later supplied snapshot now includes all three architecture toolsets and both deployed script directories, but no migration stores or normal per-user ScanState/LoadState log pair. Config.xml and the custom exclusion files exist only in USMT64, leaving the standard x86 path incomplete. The arm64 folder contains ARM64 binaries, but the legacy selection logic only distinguishes process pointer sizes and never selects it.
+
+## Findings and improvement backlog
+
+The following findings came from source review. They are not implemented fixes.
+
+| Priority | Finding | Proposed direction |
+| --- | --- | --- |
+| High | Capture reuses a profile-named store and passes /o, allowing replacement of existing store data. | Unique computer/user/capture identity; deliberate overwrite handling. |
+| High | Downloads copy exit codes are not checked; load-local.bat reaches Downloads copying after LoadState failure. | Track each stage, stop dependent operations on failure, and distinguish success, partial results, cancellation, and failure. |
+| High | Main capture/domain restore combine MigUser.xml and MigDocs.xml; local restore uses a different rule/config set. | Inspect deployed XML, choose a documented migration policy, and test consistent capture/restore behavior. Microsoft advises against combining these two discovery files. |
+| High | Active x64 Config.xml disables the Office 16 parent while several child entries say yes; Firefox/Chrome are nested under that disabled Office branch. | Confirm intended app-setting exclusions and create correctly structured rules; validate with representative Office and browser installations. Document files are a separate coverage question. |
+| High | Standard x86 capture lacks Config.xml and ExcludeSystemFolders.xml; standard/Fast x86 domain restore lacks Config.xml. ARM64 is not routed by the selectors. | Define supported architectures and validate complete, consistent dependencies before selecting an engine. |
+| High | Fast capture drops Config.xml/custom exclusions and adds /c; Fast restore changes its XML set and can restart into standard Scripts. | Replace implicit mode changes with one documented policy and explicit technician options. |
+| High | dload-exclude.txt has .exe and .msi each followed by a backslash, which does not match ordinary installer.exe or installer.msi filenames. | Correct and test exclusions; consider integrating Downloads into migration rules. |
+| High | No store verification is performed before re-imaging readiness is implied. | Verify compressed stores with UsmtUtils /verify; also test actual restores and coverage. |
+| Medium | Object-to-string parsing and assumed C:\Users account folder names are fragile. Selection and destination-account validation are limited. | Use structured profile/account properties, actual profile paths, and explicit source-to-destination mapping. |
+| Medium | Relative paths and cd transitions depend on the working directory; failed domain-restore restart can remain in the USMT directory. | Resolve paths from the toolkit root and validate resources before starting. |
+| Medium | /efs:skip excludes EFS-encrypted files; backup protection and separate Downloads protection are not defined here. | Make skipped data visible and agree encryption/key/access policy before production changes. |
+| Medium | No common manifest records source machine, account, capture time, tool/rule versions, and stage results. Folder LastWriteTime is used as a capture-date proxy. | Store migration metadata and per-run logs. |
+| Medium | Current document rules include Public/shared folders and system-context extension searches across fixed drives. | Decide intended file scope before narrowing or reproducing collection. A selected employee does not itself guarantee profile-only data. |
+| Medium | Custom exclusion files and MigApp.xml produce diagnostics against the supplied XSD; similarly named unused configuration variants differ across architectures. | Resolve rule-validation concerns with engine tests; do not assume every schema diagnostic predicts runtime failure or that unused XML changes the active workflow. |
+| Medium | UI work could freeze if migration operations block the UI event loop. | Launch long-running work separately and update the UI from real progress signals. |
+| Medium | Drive mappings may not exist after elevation; script and application controls vary by machine. | Prefer configured UNC paths, test share access under the executing identity, and pilot on restricted machines. |
+| Low | Production, experimental, archived, and troubleshooting artifacts are mixed on the share. | Separate versioned toolkit releases, migration data, and archives; retain known-good versions. |
+
+## Validation evidence and limits
+
+- Initial mock-up: PowerShell parser validation passed. Headless construction and Backup/Restore/review state checks passed. These checks did not manually exercise the folder dialog.
+- User test: the initial launcher was blocked; the modified process-scoped Bypass launcher worked and the user liked the interface. No detailed OS, policy, or network-access results were supplied.
+- Branding update: PowerShell syntax, logo loading, and header/title color checks passed. The header was rendered offscreen and visually inspected. An attempted full hidden-form render was blank and is not visual QA of the complete wizard.
+- No real ScanState, LoadState, Downloads-copy, store-verification, account-creation, or local-admin operation has been run by Codex. No end-to-end migration result has been established.
+- Progress bars and animation remain discussion only. USMT progress-log support was identified as a possible input to a future progress display; usable percentage reporting has not been tested against the deployed version.
+- Workflow setup: both installed skills match their prepared sources; frontmatter, names, UI metadata structure/lengths, scaffold removal, and relative project links were checked. All local Markdown links in this runbook resolved. The bundled quick_validate.py could not run because its Python environment lacks PyYAML; direct checks were used instead. Automatic discovery and skill-driven behavior in a fresh chat have not yet been exercised.
+- Local cleanup: all 13 moved files matched their pre-move SHA-256 hashes and no longer existed at their old root locations. No script contents were edited or executed as part of this move. `.gitignore` was added for the archive; Git ignore behavior is not yet exercised in this project because it has no Git metadata.
+- Expanded snapshot review: all 23 XML files were well-formed, all 10 PS1 files parsed, and all 10 deployed standard files matched the earlier copies. Twelve primary EXEs and sampled core DLLs report product version 10.0.26100.1; PE machine fields match the folder architectures. Three ScanState signatures checked Valid. MigXML.xsd diagnostics and runtime limits are documented in the detailed review. No binary or migration script was executed.
+- The two supplied historical logs show an incomplete ScanState generation command (code 11) and a successful UsmtUtils extraction (code 0), not a normal end-to-end migration. No employee identifiers or raw personal paths were copied into the tracked project records.
+- Git setup: repository initialized on main, origin URL checked, local author identity confirmed, and `git check-ignore -v` verified that representative legacy scripts, binaries, and logs in the archive are excluded. Initial commit review covers documentation/skill changes only; no migration-runtime tests are applicable to this baseline. Remote read access succeeded; write access remains untested.
+
+## Open questions
+
+- Which Windows versions, CPU architectures, PowerShell restrictions, and application-control policies must the production toolkit support?
+- Supplied main tool versions are now known (10.0.26100.1); why is this version marked as known-good, and which production scenarios have actually been validated?
+- Are the Office 16 parent exclusion, browser nesting, old browser-detection paths, Defender/TMP exclusions, and broad shared/fixed-drive document collection deliberate? Which should the replacement retain?
+- What data must be included or excluded: Downloads, cloud-synced folders, encrypted files, browser/application settings, and files outside standard profile folders?
+- Which restore targets are required: same domain account, renamed domain account, existing local account, or a newly created local account?
+- Should local admin membership remain available, and how should account enablement and BitLocker follow-up be handled?
+- What backup retention, encryption, key handling, access permissions, and completion criteria should apply?
+- Who owns releases? Local Git is now configured on main with the supplied origin. Before the first approved push, recheck remote refs for intervening work and confirm authentication/write access, then set upstream tracking as part of publication.
+
+## Chat workflow
+
+- Start a project chat with `$start-chat`. Read the runbook, inspect relevant current files, distinguish historical claims from fresh evidence, and give a short grounded handoff. Loading context alone does not start implementation.
+- Keep substantive changes and confirmed decisions current as work progresses. Before leaving a chat, invoke `$chat-closeout` to reconcile the latest state, milestones, evidence, and next actions and add a concise dated session entry.
+- Both skills are installed project-scoped under `.agents/skills/`: [start-chat](.agents/skills/start-chat/SKILL.md) and [chat-closeout](.agents/skills/chat-closeout/SKILL.md). If the picker has not refreshed, ask Codex to read the corresponding SKILL.md directly. Official guidance says skill changes are detected automatically; restart Codex if they do not appear.
+- Closeout first updates project records, reviews the intended changed files, and records available validation. Then ask whether to commit and push project changes to the supplied GitHub repository. If Git is not configured, explain the setup needed in that same question. If there is nothing new to publish, report that instead of asking to push an empty change. A clear answer can authorize the agreed commit/push work; no response is not approval.
+- Closeout alone does not close/archive the chat, commit/push changes, deploy to the network share, or execute outstanding implementation tasks. Record the result of an approved push or a decision to defer it without implying later local notes are already published.
+- Use America/Los_Angeles dates; distinguish user reports from direct checks; do not store secrets or employee data. Do not duplicate a closeout entry when nothing material changed.
+
+## Session history
+
+### 2026-10-23 - Initial review and UI prototype
+
+- Reviewed all original scripts and discussed reliability issues and executable versus share-based toolkit packaging.
+- Built the non-operational PowerShell/Windows Forms wizard and functional directory picker.
+- Added process-scoped Bypass after the user's launch was blocked; the user confirmed it worked.
+- Discussed progress indicators and branding, then implemented the requested purple/gold header and supplied white logo. The user accepted the branded mock-up.
+- Created this runbook and AGENTS.md, and installed start-chat/chat-closeout under `.agents/skills/` after sandbox approval. Checked the skill sources, installed contents, invocation metadata, and local links; the bundled validator was unavailable because PyYAML is missing. Fresh-chat discovery remains untested.
+- The new skills appeared in the next supplied skill catalog, confirming discovery in this ongoing chat. A separate fresh-chat invocation has not yet been tested.
+- The user supplied https://github.com/sfsujoe/SFSU-USMT.git and added a requirement to ask about committing/pushing project changes at closeout. Updated the runbook, project instructions, and installed closeout skill. Checked its frontmatter and reviewed the publishing/approval sequence. Confirmed that the local folder still has no Git metadata; no Git initialization, commit, remote change, or push was performed.
+- At the user's request, moved the 10 original files, two mock-up files, and the supplied logo to `archive/legacy-and-mockup/`. Verified identical SHA-256 hashes after the move. Added a root `.gitignore` entry for that folder and updated the runbook/current project guidance. The archive is local-only; no production code was changed, no migration ran, and no Git operation or share deployment occurred.
+- Next discussion after the initial prototype: agree technician workflows and inspect the then-missing USMT/XML dependencies. The subsequent snapshot review below resolves the source-inventory gap, but runtime coverage remains untested.
+
+### 2026-10-23 - Expanded deployed-toolkit review
+
+- The user supplied Scripts, Scripts-Fast, x86/x64/ARM64 USMT folders, a standalone LoadState-71 workaround, and two historical logs under the ignored archive.
+- Inventoried 580 files; inspected versions and PE architectures; compared standard/alternate scripts and XML; checked XML well-formedness and schema diagnostics; parsed PS1 files; read historical logs without running migration commands.
+- Recorded the actual entry-point differences, Office/browser configuration issues, incomplete architecture routing/dependencies, broad document selection, inactive/commented configuration, and Default-profile workaround behavior in [CURRENT-WORKFLOW-REVIEW.md](docs/CURRENT-WORKFLOW-REVIEW.md).
+- Updated this runbook to replace the stale missing-dependency assumption with the inspected facts. No production source/configuration was edited, no migration was run, and no Git or share operation was performed.
+- Next action: agree intentional data/application coverage and use designated test profiles to validate one consistent migration policy before UI integration.
+
+### 2026-10-23 - Initial Git baseline
+
+- The user requested Git setup and the first local commit, and supplied the commit author identity.
+- Read origin refs successfully after the initial sandbox network block; origin advertised no HEAD or branches. Initialized local main, configured the designated origin, and set the supplied identity only in this repository.
+- Added a root README describing the project records, chat skills, and local-only archive. Updated the runbook and project instructions to reflect Git setup.
+- The initial baseline contains nine documentation/skill files. Representative archive paths were confirmed ignored; source tools, migration stores, logs, and the UI prototype are outside the commit scope.
+- No GitHub push or deployment was requested or performed. The commit identifier is available from Git history after this baseline is committed.
+
+## Reference links
+
+These supported the initial review; recheck documentation when implementation depends on current behavior.
+
+- [Microsoft: USMT best practices](https://learn.microsoft.com/en-us/windows/deployment/usmt/usmt-best-practices)
+- [Microsoft: ScanState syntax](https://learn.microsoft.com/en-us/windows/deployment/usmt/usmt-scanstate-syntax)
+- [Microsoft: LoadState syntax](https://learn.microsoft.com/en-us/windows/deployment/usmt/usmt-loadstate-syntax)
+- [Microsoft: USMT return codes](https://learn.microsoft.com/en-us/troubleshoot/windows-client/setup-upgrade-and-drivers/usmt-return-codes)
+- [Microsoft: compressed-store verification](https://learn.microsoft.com/en-us/windows/deployment/usmt/verify-the-condition-of-a-compressed-migration-store)
+- [Microsoft: PowerShell execution policies](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1)
+- [Microsoft: mapped drives and elevation](https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/mapped-drives-not-available-from-elevated-command)
+- [OpenAI: build and discover skills](https://learn.chatgpt.com/docs/build-skills)

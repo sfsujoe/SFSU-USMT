@@ -1,0 +1,3 @@
+interface:
+  display_name: "Start USMT project chat"
+  short_description: "Load the USMT runbook and current project context"
