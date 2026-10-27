@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SFSU USMT — @@TITLE@@</title>
+<style>
+:root{color-scheme:light;--purple:#442c8b;--gold:#ffd24f;--ink:#202631;--muted:#566172;--line:#dce1e8}
+*{box-sizing:border-box}body{margin:0;background:#f2f4f8;color:var(--ink);font:15px/1.55 "Segoe UI",Arial,sans-serif}
+header{background:var(--purple);color:white;border-bottom:5px solid var(--gold);padding:28px max(24px,calc((100vw - 1200px)/2));display:flex;align-items:center;gap:22px}
+header h1{margin:0;color:var(--gold);font-size:28px}header p{margin:3px 0}.logo{width:72px;height:72px;object-fit:contain}
+main{max-width:1248px;margin:26px auto;padding:0 24px 40px}h2{font-size:21px;margin:0 0 14px}h3{font-size:17px;margin:0}
+.card{background:white;border:1px solid var(--line);border-radius:10px;padding:24px;margin:20px 0;box-shadow:0 2px 5px #17203406}
+.sample,.alert{padding:15px 20px;background:#fff3cd;border:1px solid #c78c1f;border-left:6px solid #aa6d00;border-radius:6px;margin:16px 0;font-weight:600}
+.alert{background:#fff0f0;border-color:#b72d2d}.result{display:flex;gap:28px;align-items:start;border-left:7px solid #7a5d11}
+.result.completed{border-left-color:#167141}.result.failed{border-left-color:#b72d2d}.result.cancelled{border-left-color:#566172}
+.result h2{font-size:26px;margin-bottom:8px}.result p{margin:5px 0}.eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:1.5px;font-weight:700;color:var(--muted)}
+.metadata{font-size:13px;color:var(--muted);overflow-wrap:anywhere}.steps{list-style:none;padding:0;margin:0;display:grid;gap:14px}
+.step{padding:18px;border:1px solid var(--line);border-left:5px solid #8791a0;border-radius:6px;break-inside:avoid}
+.step.passed{border-left-color:#167141}.step.failed{border-left-color:#b72d2d}.step.warning{border-left-color:#aa6d00}
+.step-top{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.step-number{background:#eee9f9;color:var(--purple);width:28px;height:28px;text-align:center;border-radius:50%;font-weight:700}
+.step h3{flex:1}.step p{margin:10px 0 0 40px}.duration{color:var(--muted);font-size:13px}.badge{background:#eef1f5;border-radius:4px;padding:3px 9px;font-size:12px;text-transform:uppercase}
+.passed .badge{background:#e3f4e9;color:#125a34}.failed .badge{background:#fce2e2;color:#8e1d1d}.warning .badge{background:#fff0c5;color:#755000}
+.checkpoint{margin:12px 0 0 40px;border-top:1px dashed var(--line);padding-top:10px;font-size:14px}.checkpoint span{color:var(--muted)}
+.toolbar{display:flex;gap:16px;align-items:end;flex-wrap:wrap;margin-bottom:16px}label{display:block;font-weight:600;font-size:13px}
+input,select,button{font:inherit}input,select{border:1px solid #8691a3;border-radius:5px;padding:8px 10px;background:white;color:var(--ink)}input{min-width:260px}
+button{cursor:pointer}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #8863de;outline-offset:3px}
+.reset{border:1px solid var(--purple);background:white;color:var(--purple);border-radius:5px;padding:8px 12px}.table-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{text-align:left;vertical-align:top;padding:12px;border-bottom:1px solid var(--line)}
+th{background:#f0edf7;color:var(--purple);white-space:nowrap}th button{border:0;background:none;color:inherit;font-weight:700;padding:0;text-align:left}
+th[aria-sort=ascending] button:after{content:" \2191"}th[aria-sort=descending] button:after{content:" \2193"}
+tbody tr[data-severity=ERROR]{background:#fff0f0}tbody tr[data-severity=WARNING]{background:#fff8e6}td.time{white-space:nowrap;font-variant-numeric:tabular-nums}
+td.severity{font-weight:700;white-space:nowrap}tr[data-severity=ERROR] .severity{color:#9c2020}tr[data-severity=WARNING] .severity{color:#7a5300}
+td:nth-child(5){min-width:240px;overflow-wrap:anywhere}td:last-child{min-width:190px;overflow-wrap:anywhere}details{margin-top:8px}summary{cursor:pointer;color:var(--purple)}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f3f7;border:1px solid var(--line);padding:12px;font-size:12px;max-width:600px}a{color:var(--purple)}
+.muted{color:var(--muted);font-size:13px}.controls{display:none}.interactive .controls{display:flex}.print-button{margin-left:auto}
+footer{font-size:12px;color:var(--muted)}[hidden]{display:none!important}
+@media(max-width:650px){main{padding:0 12px}.card{padding:16px}header{padding:22px 16px}header h1{font-size:23px}.logo{width:48px;height:48px}.result{display:block}.step p,.checkpoint{margin-left:0}input{min-width:0;width:100%}}
+@media print{body{background:white;font-size:11px}header{background:white;color:#202631;border-bottom:2px solid #442c8b;padding:12px}header h1{color:#442c8b}.logo{display:none}main{max-width:none;margin:0;padding:0}.card{box-shadow:none;padding:14px;margin:12px 0}.controls{display:none!important}.table-wrap{overflow:visible}table{font-size:9px}th,td{padding:6px}td:nth-child(5),td:last-child{min-width:0}.step{break-inside:avoid}thead{display:table-header-group}tr{break-inside:avoid}a{color:#202631}.sample,.alert{color:#202631}}
+</style>
+</head>
+<body>
+<header>@@LOGO@@<div><h1>SFSU USMT</h1><p>@@TITLE@@</p></div></header>
+<main>
+@@NOTICE@@
+<section class="card result @@OUTCOMECLASS@@" aria-label="Overall result">
+<div><div class="eyebrow">Overall result</div><h2 id="outcome">@@OUTCOME@@</h2><p>@@RESULT@@</p><p>@@LABEL@@</p><div class="metadata">Run ID: @@RUNID@@<br>Last recorded event: @@ASOF@@<br>Times shown in America/Los_Angeles, with UTC offset.</div></div>
+</section>
+<section class="card" aria-labelledby="steps-title"><h2 id="steps-title">Steps &amp; checkpoints</h2><p class="muted">Steps stay in their original order. Checkpoints state what was checked; capture, store verification, and restore testing are separate results.</p><ol class="steps">@@STEPS@@</ol></section>
+<section class="card" aria-labelledby="events-title"><h2 id="events-title">Detailed event log</h2>
+<p class="muted">Sequence numbers preserve the original order. Sorting this table does not change the step summary.</p>
+<noscript><p>The full report is readable below. Sorting and filtering require browser scripting.</p></noscript>
+<div class="toolbar controls"><div><label for="search">Search messages, steps, or actions</label><input type="search" id="search" placeholder="Search this run"></div><div><label for="severity">Show severity</label><select id="severity"><option value="">All events</option><option value="ERROR">Errors</option><option value="WARNING">Warnings</option><option value="INFO">Information</option></select></div><button type="button" class="reset" id="reset">Reset view</button><button type="button" class="reset print-button" id="print">Print report</button><span id="count" role="status" aria-live="polite"></span></div>
+<div class="table-wrap"><table id="events"><caption class="muted">Run events, initially ordered by sequence</caption><thead><tr><th aria-sort="ascending"><button type="button" data-column="0" aria-label="Sort by sequence">#</button></th><th><button type="button" data-column="1" aria-label="Sort by time">Time</button></th><th><button type="button" data-column="2" aria-label="Sort by step">Step</button></th><th><button type="button" data-column="3" aria-label="Sort by severity">Severity</button></th><th><button type="button" data-column="4" aria-label="Sort by message">Message / details</button></th><th><button type="button" data-column="5" aria-label="Sort by next action">Next action</button></th></tr></thead><tbody>@@ROWS@@</tbody></table></div>
+</section>
+<section class="card"><h2>Original diagnostic files</h2><ul>@@RAWLINKS@@<li><a href="events.jsonl">Structured event journal (JSON Lines)</a></li></ul><p class="muted">Keep this report with its event journal and Raw folder. Original diagnostic logs are preserved separately from the human-readable summary.</p></section>
+<footer>SFSU USMT reporting &bull; This report uses no external stylesheets, scripts, fonts, or services. A completed operation does not establish that a restore was tested.</footer>
+</main>
+<script>
+(function(){
+  'use strict';
+  var table=document.getElementById('events'), body=table.tBodies[0];
+  var rows=Array.prototype.slice.call(body.rows), headers=Array.prototype.slice.call(table.tHead.rows[0].cells);
+  var search=document.getElementById('search'), severity=document.getElementById('severity'), count=document.getElementById('count');
+  var sortColumn=0, direction=1;
+  function filter(){
+    var query=search.value.toLowerCase(), visible=0;
+    rows.forEach(function(row){row.hidden=!(row.textContent.toLowerCase().indexOf(query)!==-1&&(!severity.value||row.getAttribute('data-severity')===severity.value));if(!row.hidden){visible++;}});
+    count.textContent=visible+' of '+rows.length+' events';
+  }
+  function sort(column, order){
+    sortColumn=column;direction=order;
+    rows.sort(function(a,b){var x=a.cells[column].getAttribute('data-sort')||a.cells[column].textContent.trim(), y=b.cells[column].getAttribute('data-sort')||b.cells[column].textContent.trim();var result=column===0||column===1?Number(x)-Number(y):x.localeCompare(y);return (result||Number(a.cells[0].textContent)-Number(b.cells[0].textContent))*order;});
+    rows.forEach(function(row){body.appendChild(row);});
+    headers.forEach(function(header,i){if(i===column){header.setAttribute('aria-sort',order===1?'ascending':'descending');}else{header.removeAttribute('aria-sort');}});
+  }
+  headers.forEach(function(header,i){header.querySelector('button').addEventListener('click',function(){sort(i,sortColumn===i?-direction:1);});});
+  search.addEventListener('input',filter);severity.addEventListener('change',filter);
+  document.getElementById('reset').addEventListener('click',function(){search.value='';severity.value='';sort(0,1);filter();});
+  document.getElementById('print').addEventListener('click',function(){window.print();});
+  // Print the complete chronological event record even when the on-screen view is filtered.
+  var savedView=null;
+  window.addEventListener('beforeprint',function(){savedView={query:search.value,severity:severity.value,column:sortColumn,direction:direction};search.value='';severity.value='';sort(0,1);filter();});
+  window.addEventListener('afterprint',function(){if(savedView){search.value=savedView.query;severity.value=savedView.severity;sort(savedView.column,savedView.direction);filter();savedView=null;}});
+  filter();document.documentElement.classList.add('interactive');
+}());
+</script>
+</body>
+</html>
