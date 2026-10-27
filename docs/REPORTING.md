@@ -1,12 +1,14 @@
 # SFSU USMT reporting
 
-The reporting layer and portable reporting-preview launcher are implemented. **Backup and restore operations are not connected.** Samples never run ScanState, LoadState, UsmtUtils, account changes, or employee-data copies. A sample verifies only that its Backups folder accepts a temporary write; its capture/verification events and diagnostic file are synthetic.
+The reporting layer and portable application are implemented. The normal GUI now logs real profile discovery, signed/sealed LDAP lookup, backup-folder/metadata preparation, backup inventory, and restore-selection review. **Backup and restore engines are not connected.** See [Application testing](APP-TESTING.md). Live reports identify the actual operation and never claim that folder preparation captured employee data.
+
+Developer-only headless samples remain for testing the report renderer. Samples never run ScanState, LoadState, UsmtUtils, account changes, or employee-data copies. A sample verifies only that its Backups folder accepts a temporary write; its capture/verification events and diagnostic file are synthetic.
 
 ## Try the reports
 
-Open `sfsu-usmt.cmd`. Select Completed, Warnings, Failed, Cancelled, or Incomplete, then choose **Create sample report**. Use **Open latest report** or **Open Logs folder** to find the result. The launcher applies execution-policy Bypass only to its PowerShell process; it does not change saved policies or elevate automatically.
+Open `sfsu-usmt.cmd` for the real discovery/preparation GUI. Use **Open latest report** or **Open Logs folder** after an action to find its actual journal and HTML report. Preparation reports are also copied into the prepared folders. The launcher applies execution-policy Bypass only to its PowerShell process; it does not change saved policies or elevate automatically.
 
-For a sample without opening a window:
+For an explicitly synthetic developer sample without opening a window (Completed, Warnings, Failed, Cancelled, or Incomplete):
 
 ```powershell
 .\sfsu-usmt.cmd -Headless -Scenario Failed
@@ -59,7 +61,7 @@ HTML is replaced from a complete temporary file. Filesystems that reject atomic 
 Export-SfsuLogSnapshot -Run $run -BackupPath 'D:\SFSU-USMT\Backups\existing-backup'
 ```
 
-A copy failure leaves the original root logs available, writes `snapshot-error.txt`, adds a warning banner to the root report, and raises an error to the caller. A partial copy may remain with a `.partial` suffix; it is not a finalized snapshot. No automatic cleanup/retention is implemented. Interrupted runs can be reviewed in root Logs but are not exported as finalized snapshots.
+A copy failure leaves the original root logs available, writes `snapshot-error.txt`, adds a warning banner to the root report, and raises an error to the caller. The final staging-folder rename receives up to three attempts with a short bounded backoff for temporary file locks; persistent failure is still reported. A partial copy may remain with a `.partial` suffix; it is not a finalized snapshot. No automatic cleanup/retention is implemented. Interrupted runs can be reviewed in root Logs but are not exported as finalized snapshots.
 
 ## Integrating future operations
 

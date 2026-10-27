@@ -1,6 +1,7 @@
 @echo off
 setlocal
-rem Reporting preview only. Bypass is limited to this PowerShell process.
+rem Profile discovery and folder preparation only. USMT is not connected.
+rem Bypass is limited to this PowerShell process; this launcher does not auto-elevate.
 powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File "%~dp0App\Scripts\Start-SfsuUsmt.ps1" %*
 set "sfsuExit=%errorlevel%"
 if not "%sfsuExit%"=="0" (

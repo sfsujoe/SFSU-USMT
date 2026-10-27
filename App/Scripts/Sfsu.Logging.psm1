@@ -110,7 +110,7 @@ function New-SfsuLogRun {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PackageRoot,
-        [Parameter(Mandatory)][ValidateSet('Backup','Restore','ReportPreview')][string]$Operation,
+        [Parameter(Mandatory)][ValidateSet('Backup','Restore','ReportPreview','ProfileDiscovery','BackupPreparation','BackupInventory','RestoreReview')][string]$Operation,
         [Parameter(Mandatory)][object[]]$Steps,
         [string]$Label = '', [switch]$Sample
     )
@@ -323,6 +323,8 @@ function Update-SfsuLogReport {
     if ($header.LogoData) { $logoHtml = '<img class="logo" alt="San Francisco State University" src="data:image/png;base64,' + (ConvertTo-SfsuHtml $header.LogoData) + '">' }
     $operationTitle = [string]$header.Operation
     if ($operationTitle -eq 'ReportPreview') { $operationTitle = 'Reporting preview' }
+    $operationLabels = @{ ProfileDiscovery='Profile discovery'; BackupPreparation='Backup folder preparation'; BackupInventory='Backup inventory'; RestoreReview='Restore selection review' }
+    if ($operationLabels.ContainsKey($operationTitle)) { $operationTitle = $operationLabels[$operationTitle] }
     $tokens = @{
         TITLE = ConvertTo-SfsuHtml ($operationTitle + ' report')
         LABEL = ConvertTo-SfsuHtml $header.Label
@@ -360,7 +362,15 @@ function Export-SfsuLogSnapshot {
         [void][System.IO.Directory]::CreateDirectory((Split-Path $destination -Parent))
         $staging = $destination + '.' + [guid]::NewGuid().ToString('N') + '.partial'
         Copy-Item -LiteralPath $Run.RunDirectory -Destination $staging -Recurse -ErrorAction Stop
-        [System.IO.Directory]::Move($staging, $destination)
+        # A scanner/indexer or SMB lease can briefly hold the just-copied folder.
+        # Retry only the final rename; preserve the original failure/partial copy if it persists.
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try { [System.IO.Directory]::Move($staging, $destination); break }
+            catch {
+                if ($attempt -eq 3) { throw }
+                Start-Sleep -Milliseconds (200 * $attempt)
+            }
+        }
         Join-Path $destination 'report.html'
     } catch {
         [System.IO.File]::WriteAllText((Join-Path $Run.RunDirectory 'snapshot-error.txt'), $_.Exception.Message, $script:Utf8)

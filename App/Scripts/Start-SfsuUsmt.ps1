@@ -3,7 +3,10 @@ param(
     [switch]$Headless,
     [ValidateSet('Completed','Warnings','Failed','Cancelled','Incomplete')][string]$Scenario = 'Completed',
     [string]$SnapshotBackupPath = '',
-    [string]$RebuildReport = ''
+    [string]$RebuildReport = '',
+    [string]$LdapServer = 'ad.sfsu.edu',
+    [switch]$DiscoverProfiles,
+    [switch]$BuildUiOnly
 )
 
 Set-StrictMode -Version Latest
@@ -80,6 +83,12 @@ try {
         Update-SfsuLogReport -RunDirectory $RebuildReport
         exit 0
     }
+    if ($DiscoverProfiles) {
+        Import-Module (Join-Path $PSScriptRoot 'Sfsu.Inventory.psm1') -Force
+        $discovery = Invoke-SfsuProfileDiscovery -PackageRoot $packageRoot -Server $LdapServer
+        Write-Output $discovery.ReportPath
+        exit 0
+    }
     if ($SnapshotBackupPath -and -not $Headless) { throw 'Use -Headless when requesting a sample log snapshot.' }
     if ($Headless) {
         $report = New-SfsuSampleReport -SelectedScenario $Scenario
@@ -87,87 +96,7 @@ try {
         if ($SnapshotBackupPath) { Export-SfsuLogSnapshot -Run $script:CurrentRun -BackupPath $SnapshotBackupPath }
         exit 0
     }
-    [void][System.IO.Directory]::CreateDirectory((Join-Path $packageRoot 'Backups'))
-    [void][System.IO.Directory]::CreateDirectory((Join-Path $packageRoot 'Logs'))
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-    [System.Windows.Forms.Application]::EnableVisualStyles()
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'SFSU USMT - Reporting Preview'
-    $form.ClientSize = New-Object System.Drawing.Size(760, 430)
-    $form.StartPosition = 'CenterScreen'
-    $form.FormBorderStyle = 'FixedDialog'
-    $form.MaximizeBox = $false
-    $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
-    $form.BackColor = [System.Drawing.Color]::White
-    $header = New-Object System.Windows.Forms.Panel
-    $header.SetBounds(0, 0, 760, 90)
-    $header.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#442C8B')
-    $form.Controls.Add($header)
-    $title = New-Object System.Windows.Forms.Label
-    $title.Text = 'SFSU USMT - Reporting Preview'
-    $title.SetBounds(24, 24, 700, 44)
-    $title.Font = New-Object System.Drawing.Font('Segoe UI', 20, [System.Drawing.FontStyle]::Bold)
-    $title.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#FFD24F')
-    $header.Controls.Add($title)
-    $notice = New-Object System.Windows.Forms.Label
-    $notice.Text = 'Generate sample HTML reports. Migration operations are not connected; no employee data is accessed and no backup store is created.'
-    $notice.SetBounds(24, 112, 710, 60)
-    $form.Controls.Add($notice)
-    $label = New-Object System.Windows.Forms.Label
-    $label.Text = 'Sample outcome'
-    $label.SetBounds(24, 186, 180, 26)
-    $form.Controls.Add($label)
-    $choice = New-Object System.Windows.Forms.ComboBox
-    $choice.SetBounds(24, 216, 260, 32)
-    $choice.DropDownStyle = 'DropDownList'
-    [void]$choice.Items.AddRange(@('Completed','Warnings','Failed','Cancelled','Incomplete'))
-    $choice.SelectedIndex = 0
-    $form.Controls.Add($choice)
-    $generate = New-Object System.Windows.Forms.Button
-    $generate.Text = 'Create sample report'
-    $generate.SetBounds(304, 212, 210, 38)
-    $generate.BackColor = $header.BackColor
-    $generate.ForeColor = [System.Drawing.Color]::White
-    $generate.FlatStyle = 'Flat'
-    $form.Controls.Add($generate)
-    $open = New-Object System.Windows.Forms.Button
-    $open.Text = 'Open latest report'
-    $open.SetBounds(24, 278, 220, 38)
-    $open.Enabled = $false
-    $form.Controls.Add($open)
-    $logs = New-Object System.Windows.Forms.Button
-    $logs.Text = 'Open Logs folder'
-    $logs.SetBounds(260, 278, 220, 38)
-    $form.Controls.Add($logs)
-    $status = New-Object System.Windows.Forms.Label
-    $status.Text = 'Select an outcome, then create a sample report.'
-    $status.SetBounds(24, 340, 710, 70)
-    $form.Controls.Add($status)
-    $script:LatestReport = ''
-    $generate.Add_Click({
-        $generate.Enabled = $false
-        try {
-            $script:LatestReport = New-SfsuSampleReport -SelectedScenario ([string]$choice.SelectedItem)
-            $open.Enabled = $true
-            $status.Text = 'Sample saved. Use Open latest report to view it in your browser.' + [Environment]::NewLine + $script:LatestReport
-        } catch {
-            $status.Text = 'Could not create the sample. ' + $_.Exception.Message
-            [void][System.Windows.Forms.MessageBox]::Show($form, $status.Text, 'SFSU USMT', 'OK', 'Error')
-        } finally { $generate.Enabled = $true }
-    })
-    $open.Add_Click({
-        try { Start-Process -FilePath $script:LatestReport | Out-Null }
-        catch { [void][System.Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, 'Could not open report') }
-    })
-    $logs.Add_Click({
-        try {
-            $logsPath = Join-Path $packageRoot 'Logs'
-            [void][System.IO.Directory]::CreateDirectory($logsPath)
-            Start-Process -FilePath explorer.exe -ArgumentList ('"' + $logsPath + '"') | Out-Null
-        } catch { [void][System.Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, 'Could not open Logs') }
-    })
-    try { [void]$form.ShowDialog() } finally { $form.Dispose() }
+    . (Join-Path $PSScriptRoot 'Sfsu.Ui.ps1')
 } catch {
     # Startup may fail before the reporting module is available. Keep a plain-text fallback.
     $failureText = $_.Exception.ToString()
