@@ -2,9 +2,9 @@
 
 Project planning and development for a guided employee backup and restore toolkit using Windows User State Migration Tool (USMT).
 
-The portable application discovers registered domain profile directories, resolves their SFSU identities through LDAP, and prepares selected backup folders with identity metadata and real action logs. Backup and restore engine integration is still pending; no USMT executable runs and no employee files are copied.
+The portable application discovers registered domain and local profile directories and prepares selected backup folders with identity metadata and real logs. Domain SFSU IDs come from profile folder names, with optional exact-SID LDAP name lookup. Local accounts retain their username/SID and require an assigned display name. Backup and restore engine integration is still pending; no USMT executable runs and no employee files are copied.
 
-Open `sfsu-usmt.cmd`. The Backup tab lists profiles with checkboxes, directory/manual identity status, and **Prepare selected folders**. The Restore tab lists backup folders newest first, supports column sorting and checkboxes, and reviews the selected metadata without restoring anything. The SFSU logo appears in the header. App, Backups, and Logs are resolved from the launcher location; existing backups are preserved.
+Open `sfsu-usmt.cmd`. The startup dialog accepts an SFSU ID/password or full SFSU Login for Active Directory authentication, or **Continue without AD** for manual identity confirmation. Every selected profile requires a name. The Backup tab lists profiles with checkboxes, directory/manual identity status, and **Prepare selected folders**. The Restore tab lists backup folders newest first, supports column sorting and checkboxes, and reviews the selected metadata without restoring anything. The SFSU logo appears in the header. App, Backups, and Logs are resolved from the launcher location; existing backups are preserved.
 
 - [Project runbook](PROJECT-RUNBOOK.md): current state, decisions, milestones, validation, and next steps.
 - [Current workflow review](docs/CURRENT-WORKFLOW-REVIEW.md): findings from the supplied scripts, binaries, and migration XML.

@@ -38,6 +38,8 @@ Logs/<run-id>/
 - The HTML embeds styling, scripting, and the logo when available. It makes no remote resource requests. All events remain readable when JavaScript is disabled; sorting/filtering require scripting permitted by the browser. No browser security settings are changed.
 - Links to raw logs and the event journal are relative. Keep those files beside the report when moving it. The raw files retain their original bytes; a report never replaces engine diagnostics.
 
+The first JSONL entry includes the logo as Base64 in `Data.LogoData` so a report can be rebuilt with its original branding. This long encoded image is expected; use `report.html` for the readable view.
+
 ## Durable events and interruption recovery
 
 Events are appended and flushed to `events.jsonl` before the HTML is refreshed. Only one writer should use a particular run; independent runs use separate directories. Successful completion requires an explicit terminal event and results for every declared step. Declared steps are currently required steps; skipped or unfinished steps cannot produce Completed. Recorded errors/warnings propagate to the final result and cannot be hidden by requesting Passed/Completed.
@@ -50,7 +52,7 @@ Until a final event is recorded, the report says **Incomplete** and explains tha
 
 Regeneration finds raw logs even if an interrupted process never registered them. Unreadable/out-of-sequence journal lines produce a visible diagnostic and an Incomplete result; damaged journals cannot be silently extended. Preserve the original journal for troubleshooting. If no readable run header remains, rebuilding fails explicitly.
 
-HTML is replaced from a complete temporary file. Filesystems that reject atomic replacement fall back to overwriting from that completed file; interruption during that fallback may require regeneration from the journal. An inaccessible log destination is reported as an error. Startup failures before the module is available use a plain-text `Logs/startup-<id>.txt` fallback; if that is also unwritable, the error remains on the console.
+HTML is replaced from a complete temporary file. IO, unsupported-operation, and access-denied errors during atomic replacement fall back to overwriting only the generated HTML from that completed file, without deleting the destination first. Overwrite IO/access errors receive up to three attempts with 100 ms and 200 ms delays. Interruption during this non-atomic fallback may require regeneration from the journal. The writer attempts to clean up its own temporary file on success or failure; failed cleanup produces a warning. Genuine write denial still stops the action with the report path, a journal-preservation notice, and the original error; existing HTML may be stale. No share permissions are changed. Startup failures before the module is available use a plain-text `Logs/startup-<id>.txt` fallback; if that is also unwritable, the error remains on the console.
 
 ## Logs that travel with a backup
 
@@ -80,7 +82,7 @@ A copy failure leaves the original root logs available, writes `snapshot-error.t
 | `Update-SfsuLogReport` | Rebuild HTML from saved events without running USMT. |
 | `Export-SfsuLogSnapshot` | Preserve finalized report/journal/raw-log copies alongside an existing backup. |
 
-The caller remains responsible for performing the checks and supplying truthful evidence. The logging module does not execute or interpret USMT commands, verify stores, establish account mappings, or prove restore fidelity. Keep credentials and encryption keys out of all messages/details. Define backup identities, data coverage, engine return-code handling, and acceptance criteria before connecting migrations.
+The caller remains responsible for performing the checks and supplying truthful evidence. The logging module does not execute or interpret USMT commands, verify stores, establish account mappings, or prove restore fidelity. Keep passwords, credential objects, and encryption keys out of all messages/details. LDAP attempt diagnostics intentionally include account-name strings and credential source, with the Windows execution identity distinguished from an independently verified outbound account. Define backup identities, data coverage, engine return-code handling, and acceptance criteria before connecting migrations.
 
 ## Validation
 
@@ -88,9 +90,14 @@ Run the synthetic PowerShell suite with Windows PowerShell 5.1:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tests/Test-Logging.ps1
+
+# Inject replacement/write failures into an isolated module copy.
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tests/Test-ReportWrites.ps1
 ```
 
 The suite writes ignored artifacts under `tests/.work/`, tests portable CMD invocation, all five sample outcomes, result integrity, interruption recovery, HTML escaping, raw-log preservation, snapshot errors/collisions, and preservation of existing backup content.
+
+The report-write suite injects filesystem failures while using real isolated journal/report files. It checks replacement access denial, IO/unsupported replacement fallback, bounded retries, completion beyond the first step, persistent write denial, temporary-file cleanup, and recovery from retained events. It does not prove the permissions or filesystem behavior of the actual share.
 
 `tests/Test-ReportBrowser.cjs` uses Playwright with installed Microsoft Edge. Supply a Failed sample HTML file and an artifact directory. It tests sorting, search, filters, printing, offline links/assets, narrow screens, and JavaScript-disabled reading. Test tools are development dependencies only; technicians need neither Node.js nor Playwright.
 

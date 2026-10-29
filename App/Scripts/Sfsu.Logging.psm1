@@ -9,21 +9,36 @@ function ConvertTo-SfsuHtml([object]$Value) {
 
 function Write-SfsuAtomicText([string]$Path, [string]$Text) {
     $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
-    [System.IO.File]::WriteAllText($temporary, $Text, $script:Utf8)
-    if ([System.IO.File]::Exists($Path)) {
-        try {
-            [System.IO.File]::Replace($temporary, $Path, [NullString]::Value)
-        } catch [System.IO.IOException] {
-            # Some removable/network filesystems cannot replace files atomically.
-            # Keep the durable journal as the recovery source if this overwrite is interrupted.
-            [System.IO.File]::Copy($temporary, $Path, $true)
-            [System.IO.File]::Delete($temporary)
-        } catch [System.NotSupportedException] {
-            [System.IO.File]::Copy($temporary, $Path, $true)
-            [System.IO.File]::Delete($temporary)
+    try {
+        [System.IO.File]::WriteAllText($temporary, $Text, $script:Utf8)
+        if ([System.IO.File]::Exists($Path)) {
+            try {
+                [System.IO.File]::Replace($temporary, $Path, [NullString]::Value)
+            } catch [System.IO.IOException], [System.NotSupportedException], [System.UnauthorizedAccessException] {
+                # A share can permit writing report.html while denying atomic replacement.
+                # Overwrite only this generated report. The durable journal can rebuild it
+                # if this non-atomic fallback is interrupted. Never delete the destination.
+                for ($attempt = 0; $attempt -lt 3; $attempt++) {
+                    try {
+                        [System.IO.File]::Copy($temporary, $Path, $true)
+                        break
+                    } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+                        if ($attempt -eq 2) { throw }
+                        Start-Sleep -Milliseconds (100 * ($attempt + 1))
+                    }
+                }
+            }
+        } else {
+            [System.IO.File]::Move($temporary, $Path)
         }
-    } else {
-        [System.IO.File]::Move($temporary, $Path)
+    } catch {
+        throw [System.IO.IOException]::new(
+            ('Could not update the HTML report at "' + $Path + '". Check write access and file locks in this app session. The events.jsonl journal is preserved; the HTML report may be stale. ' + $_.Exception.Message),
+            $_.Exception)
+    } finally {
+        # Clean up only the temporary file owned by this call, without hiding a write error.
+        try { if ([System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) } }
+        catch { Write-Warning ('Could not remove temporary report file "' + $temporary + '": ' + $_.Exception.Message) }
     }
 }
 
@@ -110,7 +125,7 @@ function New-SfsuLogRun {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PackageRoot,
-        [Parameter(Mandatory)][ValidateSet('Backup','Restore','ReportPreview','ProfileDiscovery','BackupPreparation','BackupInventory','RestoreReview')][string]$Operation,
+        [Parameter(Mandatory)][ValidateSet('Backup','Restore','ReportPreview','ProfileDiscovery','BackupPreparation','BackupInventory','RestoreReview','DirectoryAuthentication')][string]$Operation,
         [Parameter(Mandatory)][object[]]$Steps,
         [string]$Label = '', [switch]$Sample
     )
@@ -323,7 +338,7 @@ function Update-SfsuLogReport {
     if ($header.LogoData) { $logoHtml = '<img class="logo" alt="San Francisco State University" src="data:image/png;base64,' + (ConvertTo-SfsuHtml $header.LogoData) + '">' }
     $operationTitle = [string]$header.Operation
     if ($operationTitle -eq 'ReportPreview') { $operationTitle = 'Reporting preview' }
-    $operationLabels = @{ ProfileDiscovery='Profile discovery'; BackupPreparation='Backup folder preparation'; BackupInventory='Backup inventory'; RestoreReview='Restore selection review' }
+    $operationLabels = @{ ProfileDiscovery='Profile discovery'; BackupPreparation='Backup folder preparation'; BackupInventory='Backup inventory'; RestoreReview='Restore selection review'; DirectoryAuthentication='Active Directory authentication' }
     if ($operationLabels.ContainsKey($operationTitle)) { $operationTitle = $operationLabels[$operationTitle] }
     $tokens = @{
         TITLE = ConvertTo-SfsuHtml ($operationTitle + ' report')
