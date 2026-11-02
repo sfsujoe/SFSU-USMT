@@ -18,14 +18,16 @@ function Get-SfsuProfiles {
     foreach ($profile in @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop)) {
         if ($profile.Special -or $profile.SID -notmatch '^(S-1-5-21-\d+-\d+-\d+)-\d+$') { continue }
         $isLocal = $localPrefixes.ContainsKey($Matches[1])
+        if ($isLocal -and $localAccounts.ContainsKey([string]$profile.SID) -and $localAccounts[[string]$profile.SID] -ieq 'defaultuser0') { continue }
         if (-not (Test-Path -LiteralPath $profile.LocalPath -PathType Container)) { continue }
         $folder = Get-Item -LiteralPath $profile.LocalPath -Force -ErrorAction Stop
+        if ($folder.Name -ieq 'defaultuser0') { continue }
         if ($folder.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
         $accountType='Domain'; $id=''; $accountName=$folder.Name; $idSource='Unavailable'
         if ($isLocal) {
             $accountType='Local'; $idSource='NotApplicable'
             if ($localAccounts.ContainsKey([string]$profile.SID) -and $localAccounts[[string]$profile.SID]) { $accountName=$localAccounts[[string]$profile.SID] }
-        } elseif ($folder.Name -match '^\d{1,32}$') { $id=$folder.Name; $idSource='ProfileDirectory' }
+        } elseif ($folder.Name -match '^p?\d{1,32}$') { $id=$folder.Name; $idSource='ProfileDirectory' }
         [pscustomobject]@{
             ProfileSid = [string]$profile.SID; ProfilePath = $folder.FullName; Loaded = [bool]$profile.Loaded
             AccountType=$accountType; AccountName=$accountName; SfsuIdSource=$idSource
@@ -133,7 +135,7 @@ function Get-SfsuDirectoryRecords {
 
 function Resolve-SfsuProfileIdentity {
     param($Profile, $Session)
-    if ($Profile.SfsuId -notmatch '^\d{1,32}$') { $Profile.IdentityStatus='Numeric SFSU ID unavailable in profile directory'; return $Profile }
+    if ($Profile.SfsuId -notmatch '^p?\d{1,32}$') { $Profile.IdentityStatus='SFSU ID unavailable in profile directory'; return $Profile }
     $records = @(Get-SfsuDirectoryRecords -Session $Session -Sid $Profile.ProfileSid)
     $Profile.IdentitySource = 'Unresolved'; $Profile.IdentityStatus = 'Account not found'
     if ($records.Count -gt 1) { $Profile.IdentityStatus = 'Conflicting directory matches'; return $Profile }
@@ -144,7 +146,7 @@ function Resolve-SfsuProfileIdentity {
     $Profile.SamAccountName = $record.SamAccountName
     $Profile.UserPrincipalName = $record.UserPrincipalName
     # No hard-coded nine-digit rule until account-format exceptions are confirmed.
-    if ($record.SamAccountName -notmatch '^\d{1,32}$') { $Profile.IdentityStatus = 'Numeric SFSU ID unavailable'; return $Profile }
+    if ($record.SamAccountName -notmatch '^p?\d{1,32}$') { $Profile.IdentityStatus = 'SFSU ID unavailable'; return $Profile }
     if ($Profile.SfsuId -and $Profile.SfsuId -cne $record.SamAccountName) { $Profile.IdentityStatus='Directory ID conflict with profile directory'; return $Profile }
     $Profile.SfsuId = $record.SamAccountName
     if ([string]::IsNullOrWhiteSpace($record.DisplayName)) { $Profile.IdentityStatus = 'Display name unavailable'; return $Profile }
@@ -167,10 +169,10 @@ function Get-SfsuLookupFailure($Failure) {
 
 function ConvertTo-SfsuLogin([string]$UserName) {
     $value = $UserName.Trim()
-    if ($value -match '^\d{1,32}$') { return ($value + '@sfsu.edu') }
-    if ($value -match '^\d{1,32}@sfsu\.edu$') { return $value }
+    if ($value -match '^p?\d{1,32}$') { return ($value + '@sfsu.edu') }
+    if ($value -match '^p?\d{1,32}@sfsu\.edu$') { return $value }
     if ($value.Contains('@')) { throw 'Enter your SFSU ID, not your email address.' }
-    throw 'Enter your numeric SFSU ID or your full SFSU Login (ID@sfsu.edu).'
+    throw 'Enter your numeric SFSU ID or p-prefixed power-user ID, optionally followed by @sfsu.edu.'
 }
 
 function Invoke-SfsuDirectoryAuthentication {
@@ -200,7 +202,7 @@ function Set-SfsuManualIdentity {
     $id=''
     if ($Profile.AccountType -eq 'Domain') {
         $id=Split-Path $Profile.ProfilePath -Leaf
-        if ($id -notmatch '^\d{1,32}$') { throw 'Cannot infer a numeric SFSU ID from this domain profile directory. Resolve the profile identity before assigning a name.' }
+        if ($id -notmatch '^p?\d{1,32}$') { throw 'Cannot infer an SFSU ID from this domain profile directory. Resolve the profile identity before assigning a name.' }
     } elseif ($Profile.AccountType -ne 'Local' -or [string]::IsNullOrWhiteSpace($Profile.AccountName)) { throw 'Profile account type/name is unresolved.' }
     if (-not $Confirmed -or [string]::IsNullOrWhiteSpace($DisplayName)) {
         throw 'Confirm a nonempty display name for the selected profile.'
@@ -224,7 +226,7 @@ function Invoke-SfsuProfileDiscovery {
         Start-SfsuLogStep -Run $run -StepId profiles
         $profiles = @(Get-SfsuProfiles)
         Write-SfsuCheckpoint -Run $run -StepId profiles -Status Passed -Message ("Found $($profiles.Count) existing domain/local account profile directories using Win32_UserProfile and local account SID prefixes.")
-        Complete-SfsuLogStep -Run $run -StepId profiles -Status Passed -Message 'System profiles, missing directories, and directory links were excluded; local accounts were retained.'
+        Complete-SfsuLogStep -Run $run -StepId profiles -Status Passed -Message 'System profiles, defaultuser0, missing directories, and directory links were excluded; other local accounts were retained.'
         Start-SfsuLogStep -Run $run -StepId lookup
         $directoryStatus = 'No domain profiles to look up'
         if ($SkipDirectoryLookup) {
@@ -286,19 +288,19 @@ function New-SfsuPreparedBackup {
     if ($Profile.IdentitySource -notin @('LDAP','Manual') -or $Profile.IdentityStatus -match 'conflict' -or
         [string]::IsNullOrWhiteSpace($Profile.DisplayName)) { throw 'Resolve or confirm this profile identity before preparing a folder.' }
     if ($Profile.AccountType -eq 'Domain') {
-        if ($Profile.SfsuId -notmatch '^\d{1,32}$' -or $Profile.SfsuId -cne (Split-Path $Profile.ProfilePath -Leaf)) { throw 'The domain SFSU ID must match the profile directory.' }
+        if ($Profile.SfsuId -notmatch '^p?\d{1,32}$' -or $Profile.SfsuId -cne (Split-Path $Profile.ProfilePath -Leaf)) { throw 'The domain SFSU ID must match the profile directory.' }
     } elseif ($Profile.AccountType -eq 'Local') {
         if ($Profile.SfsuId -or [string]::IsNullOrWhiteSpace($Profile.AccountName) -or $Profile.IdentitySource -ne 'Manual' -or $Profile.DirectorySid) { throw 'Local accounts require a confirmed display name and local account identity, without an SFSU ID or AD identity.' }
     } else { throw 'Unknown profile account type.' }
     if ($Profile.IdentitySource -eq 'Manual' -and -not $Profile.ManualConfirmed) { throw 'Manual identity confirmation is required.' }
-    if ($Profile.IdentitySource -eq 'LDAP' -and ($Profile.DirectorySid -ne $Profile.ProfileSid -or -not $Profile.VerifiedAtUtc)) { throw 'Directory identity does not match the source profile SID.' }
+    if ($Profile.IdentitySource -eq 'LDAP' -and ($Profile.DirectorySid -ne $Profile.ProfileSid -or $Profile.SamAccountName -cne $Profile.SfsuId -or -not $Profile.VerifiedAtUtc)) { throw 'Directory identity does not match the source profile SID/account ID.' }
     if ($Profile.ProfileSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'A user-account profile SID is required.' }
     [void](Assert-SfsuPlainDirectory $Profile.ProfilePath)
     $root = Join-Path $PackageRoot 'Backups'
     [void][IO.Directory]::CreateDirectory($root)
     $root = Assert-SfsuPlainDirectory $root
     if ($Profile.AccountType -eq 'Local') { $id=ConvertTo-SfsuFolderPart ('Local-'+$Profile.AccountName) 40 }
-    else { $id=ConvertTo-SfsuFolderPart $Profile.SfsuId 32 }
+    else { $id=ConvertTo-SfsuFolderPart $Profile.SfsuId 33 }
     $computer = ConvertTo-SfsuFolderPart $env:COMPUTERNAME 20
     # Leave room for finalized log snapshots on Windows PowerShell's legacy path APIs.
     $nameLimit = [Math]::Min(48, 190 - $root.Length - $id.Length - $computer.Length - 19)
@@ -389,7 +391,7 @@ function Read-SfsuBackupManifest([string]$Path) {
     if ($data.SchemaVersion -eq 2 -and $data.SourceProfile.Sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'Missing source account SID.' }
     if ($data.Identity.AccountType -eq 'Local') {
         if ($data.Identity.SfsuId -or [string]::IsNullOrWhiteSpace($data.Identity.AccountName) -or $data.Identity.DirectorySid -or $data.Identity.Source -ne 'Manual' -or $data.Identity.ManualConfirmed -ne $true) { throw 'Invalid local-account identity metadata.' }
-    } elseif ($data.Identity.AccountType -ne 'Domain' -or $data.Identity.SfsuId -notmatch '^\d{1,32}$') { throw 'Invalid domain identity metadata.' }
+    } elseif ($data.Identity.AccountType -ne 'Domain' -or $data.Identity.SfsuId -notmatch '^p?\d{1,32}$') { throw 'Invalid domain identity metadata.' }
     if ([string]::IsNullOrWhiteSpace($data.Identity.DisplayName) -or
         $data.Identity.Source -notin @('LDAP','Manual') -or [string]::IsNullOrWhiteSpace($data.SourceComputer)) { throw 'Missing identity metadata.' }
     $created = [DateTimeOffset]::Parse($data.CreatedUtc, [Globalization.CultureInfo]::InvariantCulture)

@@ -8,3 +8,6 @@
 /Backups/
 /Logs/
 /tests/.work/
+
+# Shared runtime appearance preference (ships with Classic when absent).
+/App/Settings/

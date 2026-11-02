@@ -48,10 +48,11 @@ $fixtures=@(
 & $module {
     param($items,$local)
     $script:Fixtures=$items; $script:LocalSid=$local
+    $script:LocalAccountFixtures=@([pscustomobject]@{SID=$local;Name='local-tech'})
     function script:Get-CimInstance {
         param($ClassName,$Filter,$ErrorAction)
         $script:CimCalls++
-        if ($ClassName -eq 'Win32_UserAccount') { return [pscustomobject]@{SID=$script:LocalSid;Name='local-tech'} }
+        if ($ClassName -eq 'Win32_UserAccount') { return $script:LocalAccountFixtures }
         $script:Fixtures
     }
     $script:CimCalls=0
@@ -64,6 +65,30 @@ $allProfiles=@(Get-SfsuProfiles)
 $localProfile=@($allProfiles | Where-Object AccountType -eq 'Local')[0]
 Assert-True ($allProfiles.Count -eq 2 -and $localProfile.ProfileSid -eq $localSid) 'General discovery includes local and domain user profiles but excludes system/missing profiles.'
 Assert-True (-not $localProfile.SfsuId -and $localProfile.AccountName -eq 'local-tech') 'Local SID classification overrides a numeric folder name and preserves the local SAM username.'
+# Setup profiles are excluded by exact folder/account name, without hiding
+# similarly named ordinary accounts or altering their contents.
+$setupPath=Join-Path $testRoot 'DeFaUlTuSeR0'; $renamedSetupPath=Join-Path $testRoot 'setup-remnant'; $neighborPath=Join-Path $testRoot 'defaultuser01'
+foreach ($fixturePath in @($setupPath,$renamedSetupPath,$neighborPath)) { [void][IO.Directory]::CreateDirectory($fixturePath) }
+$setupSentinel=Join-Path $setupPath 'preserve.txt'; [IO.File]::WriteAllText($setupSentinel,'Synthetic setup profile contents stay untouched.')
+$setupSid='S-1-5-21-444444-555555-666666-1002'; $renamedSetupSid='S-1-5-21-444444-555555-666666-1003'; $neighborSid='S-1-5-21-444444-555555-666666-1004'
+try {
+    & $module {
+        param($folder,$renamed,$neighbor,$folderSid,$renamedSid,$neighborSid)
+        $script:Fixtures+=@(
+            [pscustomobject]@{SID=$folderSid;LocalPath=$folder;Special=$false;Loaded=$false},
+            [pscustomobject]@{SID=$renamedSid;LocalPath=$renamed;Special=$false;Loaded=$false},
+            [pscustomobject]@{SID=$neighborSid;LocalPath=$neighbor;Special=$false;Loaded=$false}
+        )
+        $script:LocalAccountFixtures+=@([pscustomobject]@{SID=$renamedSid;Name='DEFAULTUSER0'},[pscustomobject]@{SID=$neighborSid;Name='defaultuser01'})
+    } $setupPath $renamedSetupPath $neighborPath $setupSid $renamedSetupSid $neighborSid
+    $filteredSetup=@(Get-SfsuProfiles)
+    Assert-True (@($filteredSetup | Where-Object ProfileSid -eq $setupSid).Count -eq 0) 'A defaultuser0 folder is excluded case-insensitively even without a surviving SAM account.'
+    Assert-True (@($filteredSetup | Where-Object ProfileSid -eq $renamedSetupSid).Count -eq 0) 'The defaultuser0 SAM account is excluded even with a differently named profile folder.'
+    Assert-True ($filteredSetup.Count -eq 3 -and @($filteredSetup | Where-Object ProfileSid -eq $neighborSid).Count -eq 1) 'The exact-name filter preserves regular profiles and defaultuser01.'
+    Assert-True ([IO.File]::ReadAllText($setupSentinel) -eq 'Synthetic setup profile contents stay untouched.') 'Filtering never modifies the excluded profile.'
+} finally {
+    & $module { param($items,$sid) $script:Fixtures=$items; $script:LocalAccountFixtures=@([pscustomobject]@{SID=$sid;Name='local-tech'}) } $fixtures $localSid
+}
 & $module {
     param($sid)
     $script:Records=@{ $sid=@([pscustomobject]@{Sid=$sid;SamAccountName='000000123';DisplayName='Synthetic Person';UserPrincipalName='000000123@example.invalid'}) }
@@ -118,7 +143,9 @@ $secretFixture='SYNTHETIC-password-must-not-be-logged-578'
 $credentialFixture=New-Object Management.Automation.PSCredential('EXAMPLE\PowerTech',(ConvertTo-SecureString $secretFixture -AsPlainText -Force))
 Assert-True ((ConvertTo-SfsuLogin ' 000000123 ') -ceq '000000123@sfsu.edu') 'Bare IDs normalize to SFSU Login while preserving leading zeros.'
 Assert-True ((ConvertTo-SfsuLogin '000000123@SFSU.EDU') -ceq '000000123@SFSU.EDU') 'A complete login is accepted without appending or rewriting its suffix.'
-foreach ($invalidLogin in @('','person@sfsu.edu','000000123@example.invalid','EXAMPLE\tech','12 34','123@sfsu.edu@sfsu.edu')) {
+Assert-True ((ConvertTo-SfsuLogin ' p000000123 ') -ceq 'p000000123@sfsu.edu') 'Power-user login preserves the p prefix and leading zeros.'
+Assert-True ((ConvertTo-SfsuLogin 'p000000123@sfsu.edu') -ceq 'p000000123@sfsu.edu') 'A full power-user login receives no second suffix.'
+foreach ($invalidLogin in @('','person@sfsu.edu','000000123@example.invalid','EXAMPLE\tech','12 34','123@sfsu.edu@sfsu.edu','p','pp000000123','p000000123@example.invalid','p000000123@sfsu.edu@sfsu.edu','p12 34','x000000123')) {
     Assert-Throws { ConvertTo-SfsuLogin $invalidLogin } ('Invalid/email login is rejected: ' + $invalidLogin)
 }
 $beforeAuthCim=& $module { $script:CimCalls }
@@ -262,6 +289,72 @@ $localMetadata.Identity.SfsuId='000000123'
 $badLocal=@(Get-SfsuBackupCatalog $localRoot | Where-Object Path -eq $badLocalFolder)[0]
 Assert-True (-not $badLocal.MetadataValid) 'A local-account record with a fabricated SFSU ID is not accepted as valid metadata.'
 
+# Power-user identity is distinct from the regular account with the same numeric suffix.
+$powerRoot=Join-Path $testRoot 'power-package'; [void][IO.Directory]::CreateDirectory($powerRoot)
+$powerPath=Join-Path $testRoot 'p000000123'; [void][IO.Directory]::CreateDirectory($powerPath)
+$powerSid='S-1-5-21-111111-222222-333333-1201'
+$powerFixture=[pscustomobject]@{SID=$powerSid;LocalPath=$powerPath;Special=$false;Loaded=$false}
+$savedFixtures=& $module { $script:Fixtures }
+try {
+    & $module {
+        param($item,$sid)
+        $script:Fixtures=@($item)
+        $script:Records[$sid]=@([pscustomobject]@{Sid=$sid;SamAccountName='p000000123';DisplayName='Synthetic Power User';UserPrincipalName='p000000123@sfsu.edu'})
+    } $powerFixture $powerSid
+    $powerDiscovery=Invoke-SfsuProfileDiscovery -PackageRoot $powerRoot
+    $powerVerified=$powerDiscovery.Profiles[0]
+    Assert-True ($powerVerified.SfsuId -ceq 'p000000123' -and $powerVerified.SfsuIdSource -eq 'ProfileDirectory') 'Power-user profile discovery retains the full prefixed folder ID.'
+    Assert-True ($powerVerified.IdentitySource -eq 'LDAP' -and $powerVerified.DirectorySid -eq $powerSid -and $powerVerified.DisplayName -eq 'Synthetic Power User') 'Exact-SID LDAP verification accepts a matching power-user account and name.'
+    foreach ($mismatch in @('id','sid','name')) {
+        & $module {
+            param($sid,$kind,$otherSid)
+            $record=$script:Records[$sid][0]
+            $record.SamAccountName='p000000123'; $record.Sid=$sid; $record.DisplayName='Synthetic Power User'
+            switch ($kind) {
+                'id' { $record.SamAccountName='000000123' }
+                'sid' { $record.Sid=$otherSid }
+                'name' { $record.DisplayName=' ' }
+            }
+        } $powerSid $mismatch $domainSid
+        $powerRejected=(Invoke-SfsuProfileDiscovery -PackageRoot $powerRoot).Profiles[0]
+        Assert-True ($powerRejected.IdentitySource -ne 'LDAP' -and -not $powerRejected.VerifiedAtUtc) ('Power-user verification refuses a mismatching '+$mismatch)
+        if ($mismatch -ne 'name') {
+            Assert-Throws { Set-SfsuManualIdentity -Profile $powerRejected -DisplayName 'Cannot Bypass' -Confirmed } ('Manual assignment cannot bypass a power-user '+$mismatch+' conflict.')
+        }
+    }
+    & $module { param($sid) $script:Records[$sid][0].Sid=$sid; $script:Records[$sid][0].DisplayName='Synthetic Power User' } $powerSid
+    $powerPrepared=Invoke-SfsuBackupPreparation -PackageRoot $powerRoot -Profiles @($powerVerified)
+    Assert-True ($powerPrepared.Paths.Count -eq 1 -and $powerPrepared.Errors.Count -eq 0) 'A verified power-user profile can prepare a folder.'
+    Assert-True ((Split-Path $powerPrepared.Paths[0] -Leaf) -match '^p000000123_Synthetic Power User_') 'Power-user backup naming preserves the p prefix.'
+    $powerManifest=Join-Path $powerPrepared.Paths[0] 'backup.json'
+    $powerMetadata=ConvertFrom-Json ([IO.File]::ReadAllText($powerManifest))
+    Assert-True ($powerMetadata.Identity.SfsuId -ceq 'p000000123' -and $powerMetadata.Identity.SamAccountName -ceq 'p000000123' -and $powerMetadata.Identity.AccountType -eq 'Domain') 'Saved power-user metadata retains the complete domain account ID.'
+    $powerCatalog=Invoke-SfsuBackupInventory -PackageRoot $powerRoot
+    Assert-True ($powerCatalog.Backups[0].MetadataValid -and $powerCatalog.Backups[0].SfsuId -ceq 'p000000123') 'Power-user metadata lists offline without losing its prefix.'
+    $powerReview=Invoke-SfsuRestoreReview -PackageRoot $powerRoot -Backups @($powerCatalog.Backups[0])
+    Assert-True ([IO.File]::ReadAllText($powerReview.ReportPath).Contains('no migration data exists to restore')) 'Power-user restore review retains the preparation-only warning.'
+    $powerHash=(Get-FileHash $powerManifest).Hash
+    & $module { param($sid) $script:Records[$sid][0].DisplayName='Renamed Power User' } $powerSid
+    $powerRenamed=Invoke-SfsuBackupInventory -PackageRoot $powerRoot -LookupNames
+    Assert-True ($powerRenamed.Backups[0].FormerName -eq 'Synthetic Power User' -and $powerRenamed.Backups[0].DisplayName -eq 'Renamed Power User') 'Current-name refresh verifies a prefixed account ID.'
+    & $module { param($sid) $script:Records[$sid][0].SamAccountName='000000123' } $powerSid
+    $powerWrongAccount=Invoke-SfsuBackupInventory -PackageRoot $powerRoot -LookupNames
+    Assert-True (-not $powerWrongAccount.Backups[0].FormerName -and $powerWrongAccount.Backups[0].DisplayName -eq 'Synthetic Power User') 'The regular account cannot supply a power-user rename.'
+    Assert-True ((Get-FileHash $powerManifest).Hash -eq $powerHash) 'Power-user refresh preserves historical metadata.'
+    $powerForged=$powerVerified.PSObject.Copy(); $powerForged.SamAccountName='000000123'
+    $powerBlocked=Invoke-SfsuBackupPreparation -PackageRoot $powerRoot -Profiles @($powerForged)
+    Assert-True ($powerBlocked.Paths.Count -eq 0 -and $powerBlocked.Errors.Count -eq 1) 'Preparation rejects an LDAP identity that drops the power-user prefix.'
+    $powerManual=$powerVerified.PSObject.Copy()
+    Set-SfsuManualIdentity -Profile $powerManual -DisplayName 'Assigned Power User' -Confirmed | Out-Null
+    Assert-True ($powerManual.SfsuId -ceq 'p000000123' -and $powerManual.IdentitySource -eq 'Manual' -and -not $powerManual.DirectorySid) 'Manual name assignment preserves the power-user ID without claiming AD verification.'
+    $powerManualPrepared=Invoke-SfsuBackupPreparation -PackageRoot $powerRoot -Profiles @($powerManual)
+    Assert-True ($powerManualPrepared.Paths.Count -eq 1 -and $powerManualPrepared.Errors.Count -eq 0) 'Confirmed manual power-user identity can prepare a folder.'
+    # A p-prefixed local folder must still be classified by its local SID.
+    & $module { param($item,$sid) $script:Fixtures=@([pscustomobject]@{SID=$sid;LocalPath=$item.LocalPath;Special=$false;Loaded=$false}) } $powerFixture $localSid
+    $powerLocal=@(Get-SfsuProfiles)[0]
+    Assert-True ($powerLocal.AccountType -eq 'Local' -and -not $powerLocal.SfsuId) 'A p-prefixed local profile folder does not imply a domain account.'
+} finally { & $module { param($items) $script:Fixtures=$items } $savedFixtures }
+
 if ($IncludeUi) {
     $uiManualFixture=$manual
     $uiForm=. (Join-Path $repository 'App/Scripts/Start-SfsuUsmt.ps1') -BuildUiOnly
@@ -269,10 +362,13 @@ if ($IncludeUi) {
         $uiForm.ShowInTaskbar=$false; $uiForm.StartPosition='Manual'; $uiForm.Location=New-Object Drawing.Point(-30000,-30000)
         $uiForm.Show(); [Windows.Forms.Application]::DoEvents()
         Assert-True ($null -ne $script:SfsuUi.Logo) 'UI header loads the supplied SFSU logo.'
+        Set-SfsuProfileRows @($powerVerified,$powerManual)
+        Assert-True ($script:SfsuUi.Profiles.Rows[0].Cells['SfsuId'].Value -ceq 'p000000123' -and $script:SfsuUi.Profiles.Rows[0].Cells['Verified'].Value -ceq (([string][char]0x2705)+' AD verified')) 'The grid shows the full power-user ID and AD verification text/mark.'
+        Assert-True (-not $script:SfsuUi.Profiles.Rows[1].Cells['Verified'].Value -and -not (Test-SfsuProfileVerified $powerForged)) 'Manual or prefix-mismatched power-user identities stay unverified in the UI.'
         Set-SfsuProfileRows @($verified,$uiManualFixture)
         Assert-True ($script:SfsuUi.Profiles.Columns['Verified'].Index -eq 2 -and $script:SfsuUi.Profiles.Columns['DisplayName'].Index -eq 3) 'Verified appears between SFSU ID and Name.'
         Assert-True ($script:SfsuUi.Profiles.Columns['Sid'].Index -eq $script:SfsuUi.Profiles.Columns.Count-1 -and $script:SfsuUi.Profiles.Rows[0].Cells['Sid'].Value -eq $domainSid) 'The final column contains the actual profile SID.'
-        Assert-True ($script:SfsuUi.Profiles.Rows[0].Cells['Verified'].Value -ceq ([string][char]0x2705) -and -not $script:SfsuUi.Profiles.Rows[1].Cells['Verified'].Value) 'Only the AD-verified profile receives a check mark; manual identity stays unmarked.'
+        Assert-True ($script:SfsuUi.Profiles.Rows[0].Cells['Verified'].Value -ceq (([string][char]0x2705)+' AD verified') -and -not $script:SfsuUi.Profiles.Rows[1].Cells['Verified'].Value) 'Only the AD-verified profile receives text/check mark; manual identity stays unmarked.'
         foreach ($case in @('sid','id','name','time','conflict')) {
             $notVerified=$verified.PSObject.Copy()
             switch ($case) {
@@ -344,7 +440,7 @@ if ($IncludeUi) {
         # Exercise modal dialog wiring using synthetic identities and a cancelled credential prompt.
         $manualUiProfile=$verified.PSObject.Copy()
         Set-SfsuProfileRows @($manualUiProfile)
-        Assert-True ($script:SfsuUi.Profiles.Rows[0].Cells['Verified'].Value -ceq ([string][char]0x2705)) 'The manual reassignment fixture starts with a real AD verification mark.'
+        Assert-True ($script:SfsuUi.Profiles.Rows[0].Cells['Verified'].Value -ceq (([string][char]0x2705)+' AD verified')) 'The manual reassignment fixture starts with AD verification text/mark.'
         $manualTimer=New-Object Windows.Forms.Timer; $manualTimer.Interval=100
         $manualTimer.Add_Tick({
             $testDialogWindow=@([Windows.Forms.Application]::OpenForms | Where-Object Text -eq 'Assign Display Name')

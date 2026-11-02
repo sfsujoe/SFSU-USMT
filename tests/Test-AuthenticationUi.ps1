@@ -32,7 +32,7 @@ $script:SfsuUi.Root=$testRoot
 $main.ShowInTaskbar=$false; $main.StartPosition='Manual'; $main.Location=New-Object Drawing.Point(-30000,-30000)
 $main.Show()
 try {
-    foreach ($case in @('validation','retry','cancel','accept-flow')) {
+    foreach ($case in @('validation','retry','cancel','power-full','accept-flow')) {
         $dialog=New-SfsuAuthenticationDialog
         $dialog.StartPosition='Manual'; $dialog.Location=New-Object Drawing.Point(-30000,-30000); $dialog.ShowInTaskbar=$false
         $script:AuthCase=[pscustomobject]@{Kind=$case;Dialog=$dialog;Stage=0;Error='';Deadline=[DateTime]::UtcNow.AddSeconds(15);FailureSeen=$false}
@@ -45,8 +45,12 @@ try {
                     $c.Stage=1
                     Assert-True ($s.Form.Text -eq 'Authenticate to Active Directory') 'Dialog title is exact.'
                     Assert-True (@($s.Form.Controls | Where-Object Text -eq 'Enter your SFSU ID and password').Count -eq 1) 'Dialog message is exact.'
+                    Assert-True ($s.Heading.Font.Bold -and $s.Heading.Font.SizeInPoints -gt $s.Form.Font.SizeInPoints) 'The sign-in instruction is larger and bold.'
+                    Assert-True (@($s.Form.Controls | Where-Object { $_.Text -match '\(optional @sfsu.edu\)' }).Count -eq 0) 'The optional-login suffix is removed from the visible label.'
+                    Assert-True ($s.Purpose.Text -eq 'AD resolves SFSU ID to Display Name.' -and $s.Purpose.Text -notmatch 'password') 'The short footer explains identity resolution without password copy.'
                     Assert-True ($s.Authenticate.Text -eq 'Authenticate' -and $s.Continue.Text -eq 'Continue without AD') 'Both action labels are exact.'
-                    Assert-True ($s.Authenticate.Left -gt $s.Continue.Right -and $s.Authenticate.Top -eq $s.Continue.Top -and $s.Form.ClientSize.Width-$s.Authenticate.Right -eq 18) 'Authenticate is bottom right, with Continue without AD immediately to its left.'
+                    $expectedMargin=[int](18*[Math]::Max(1.0,$s.Form.Font.SizeInPoints/10.0))
+                    Assert-True ($s.Authenticate.Left -gt $s.Continue.Right -and $s.Authenticate.Top -eq $s.Continue.Top -and $s.Form.ClientSize.Width-$s.Authenticate.Right -eq $expectedMargin) ('Authenticate is bottom right, with Continue without AD immediately to its left. Client: '+$s.Form.ClientSize+'; buttons: '+$s.Continue.Bounds+' / '+$s.Authenticate.Bounds+'; expected margin: '+$expectedMargin)
                     Assert-True ($s.Form.AcceptButton -eq $s.Authenticate -and $s.Password.UseSystemPasswordChar) 'Enter authenticates and password entry is masked.'
                     if ($c.Kind -eq 'validation') {
                         $s.User.Text='person@sfsu.edu'
@@ -61,6 +65,8 @@ try {
                         $s.Continue.PerformClick()
                     } else {
                         $s.User.Text='000000123'
+                        if ($c.Kind -eq 'power-full') { $s.User.Text='p000000123@sfsu.edu' }
+                        elseif ($c.Kind -eq 'accept-flow') { $s.User.Text='p000000123' }
                         if ($c.Kind -eq 'retry') { $s.Password.Text='wrong' }
                         elseif ($c.Kind -eq 'cancel') { $s.Password.Text='wait' }
                         else { $s.Password.Text='synthetic-good-password' }
@@ -69,6 +75,9 @@ try {
                     }
                 } elseif ($c.Kind -eq 'retry' -and $c.Stage -eq 1 -and $null -eq $s.Worker) {
                     Assert-True ($s.Hint.Text -match 'Authentication failed' -and -not $s.Succeeded -and $null -eq $s.Credential) 'Rejected credentials leave the dialog open for retry and discard the failed password.'
+                    Assert-True ($s.Hint.Text.StartsWith(([string][char]0x26D4)+' ') -and $s.Hint.AccessibleName -eq $s.Hint.Text) 'AD failure is prefixed with the stop symbol and retains accessible error text.'
+                    $bitmap=New-Object Drawing.Bitmap($s.Form.Width,$s.Form.Height)
+                    try { $s.Form.DrawToBitmap($bitmap,(New-Object Drawing.Rectangle(0,0,$bitmap.Width,$bitmap.Height))); $bitmap.Save((Join-Path $testRoot 'authentication-failure.png')) } finally { $bitmap.Dispose() }
                     $c.FailureSeen=$true; $c.Stage=2
                     $s.Password.Text='synthetic-good-password'; $s.Authenticate.PerformClick()
                 } elseif ($c.Kind -eq 'cancel' -and $c.Stage -eq 1) {
@@ -76,7 +85,8 @@ try {
                 }
             } catch { $c.Error=$_.Exception.Message; $c.Dialog.Close() }
         })
-        $driver.Start()
+        # Start interaction only after WinForms has completed showing/DPI layout.
+        $dialog.Add_Shown({ $driver.Start() }.GetNewClosure())
         try {
             if ($case -eq 'accept-flow') {
                 $script:WrappedDialog=$dialog
@@ -85,7 +95,7 @@ try {
                 function Start-SfsuUiTask { param($Action,$Items) $script:AuthenticatedAction=$Action }
                 try { Show-SfsuDirectoryCredentials }
                 finally { Set-Item function:New-SfsuAuthenticationDialog $savedDialogFunction; Set-Item function:Start-SfsuUiTask $savedStartFunction }
-                Assert-True ($script:SfsuUi.UseDirectory -and $script:SfsuUi.Credential.UserName -eq '000000123@sfsu.edu' -and $script:AuthenticatedAction -eq 'Discover profiles') 'Verified credentials transfer into app state before discovery starts.'
+                Assert-True ($script:SfsuUi.UseDirectory -and $script:SfsuUi.Credential.UserName -eq 'p000000123@sfsu.edu' -and $script:AuthenticatedAction -eq 'Discover profiles') 'Verified power-user credentials transfer into app state with their prefix before discovery starts.'
                 Assert-True ($script:SfsuUi.Credential.GetNetworkCredential().Password -eq 'synthetic-good-password') 'Dialog disposal does not dispose the successfully transferred app-session credential.'
             } else { $result=$dialog.ShowDialog($main) }
             if ($script:AuthCase.Error) { throw $script:AuthCase.Error }
@@ -94,6 +104,8 @@ try {
                 Assert-True ($dialog.Tag.Credential.UserName -ceq '000000123@sfsu.edu') 'The submitted bare ID becomes a full login, preserving leading zeros.'
                 Assert-True (Test-Path -LiteralPath $dialog.Tag.ReportPath) 'The verified authentication has its own real report.'
                 Assert-True (-not [IO.File]::ReadAllText($dialog.Tag.ReportPath).Contains('synthetic-good-password')) 'Authentication reports do not contain the submitted password.'
+            } elseif ($case -eq 'power-full') {
+                Assert-True ($result -eq 'OK' -and $dialog.Tag.Succeeded -and $dialog.Tag.Credential.UserName -ceq 'p000000123@sfsu.edu') 'The full power-user login authenticates without adding a second suffix.'
             } elseif ($case -ne 'accept-flow') {
                 Assert-True ($result -eq 'Cancel' -and -not $dialog.Tag.Succeeded -and $null -eq $dialog.Tag.Credential) 'Continue without AD never returns an authenticated credential, including during an active attempt.'
             }
