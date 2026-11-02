@@ -2,12 +2,51 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.DirectoryServices.Protocols
+Import-Module (Join-Path $PSScriptRoot 'Sfsu.Logging.psm1')
 
 function Get-SfsuPacificTime([DateTimeOffset]$Time = [DateTimeOffset]::UtcNow) {
     [TimeZoneInfo]::ConvertTime($Time, [TimeZoneInfo]::FindSystemTimeZoneById('Pacific Standard Time'))
 }
 
+function Get-SfsuProfilePathAttributes([string]$Path) { [IO.File]::GetAttributes($Path) }
+
+function Get-SfsuProfilePathInspection([string]$Path) {
+    # Inventory needs metadata, not permission to list another user's files.
+    # Native write guards intentionally require more access and belong on the
+    # toolkit's writable destinations, not on registered source profiles.
+    try {
+        if (-not [IO.Path]::IsPathRooted($Path)) { throw 'A registered profile path must be absolute.' }
+        $full=[IO.Path]::GetFullPath($Path).TrimEnd('\')
+        if ($full -match '^[A-Za-z]:$') { $full+='\' }
+    } catch { return [pscustomobject]@{Path=$Path;Status='Invalid';Message='Invalid registered profile path.'} }
+    $paths=New-Object Collections.Generic.List[string]
+    $current=$full
+    while ($current) { $paths.Add($current); $current=[IO.Path]::GetDirectoryName($current) }
+    $paths.Reverse()
+    $uncertain=$false
+    foreach ($itemPath in $paths) {
+        try { $attributes=Get-SfsuProfilePathAttributes $itemPath }
+        catch {
+            $failure=$_.Exception.GetBaseException()
+            if ($failure -is [IO.FileNotFoundException] -or $failure -is [IO.DirectoryNotFoundException]) {
+                return [pscustomobject]@{Path=$full;Status='Missing';Message='Registered profile directory is missing.'}
+            }
+            $uncertain=$true
+            continue
+        }
+        if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
+            return [pscustomobject]@{Path=$full;Status='Linked';Message='Linked profile directory or ancestor.'}
+        }
+        if (-not ($attributes -band [IO.FileAttributes]::Directory)) {
+            return [pscustomobject]@{Path=$full;Status='Invalid';Message='Registered profile path is not a directory.'}
+        }
+    }
+    if ($uncertain) { return [pscustomobject]@{Path=$full;Status='AccessUnverified';Message='Source directory metadata access could not be verified; profile remains listed. Resolve access before capture.'} }
+    [pscustomobject]@{Path=$full;Status='Ready';Message='Directory metadata checked; file-list/read access has not been tested.'}
+}
+
 function Get-SfsuProfiles {
+    param($Run=$null)
     # Query only the local account database. Do not enumerate domain accounts.
     $localPrefixes = @{}
     $localAccounts = @{}
@@ -15,26 +54,57 @@ function Get-SfsuProfiles {
         if ($account.SID -match '^(S-1-5-21-\d+-\d+-\d+)-\d+$') { $localPrefixes[$Matches[1]] = $true; $localAccounts[[string]$account.SID] = [string]$account.Name }
     }
     if ($localPrefixes.Count -eq 0) { throw 'Could not establish the local account SID prefix; profile classification stopped.' }
+    $excluded=@{}
     foreach ($profile in @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop)) {
-        if ($profile.Special -or $profile.SID -notmatch '^(S-1-5-21-\d+-\d+-\d+)-\d+$') { continue }
-        $isLocal = $localPrefixes.ContainsKey($Matches[1])
-        if ($isLocal -and $localAccounts.ContainsKey([string]$profile.SID) -and $localAccounts[[string]$profile.SID] -ieq 'defaultuser0') { continue }
-        if (-not (Test-Path -LiteralPath $profile.LocalPath -PathType Container)) { continue }
-        $folder = Get-Item -LiteralPath $profile.LocalPath -Force -ErrorAction Stop
-        if ($folder.Name -ieq 'defaultuser0') { continue }
-        if ($folder.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
-        $accountType='Domain'; $id=''; $accountName=$folder.Name; $idSource='Unavailable'
+        $reason=''
+        $sidMatch=[regex]::Match([string]$profile.SID,'^(S-1-5-21-\d+-\d+-\d+)-\d+$')
+        if ($profile.Special) { $reason='System profile' }
+        elseif (-not $sidMatch.Success) { $reason='Unsupported account SID (including Entra profiles)' }
+        if ($reason) { $excluded[$reason]=1+[int]$excluded[$reason]; continue }
+        $isLocal = $localPrefixes.ContainsKey($sidMatch.Groups[1].Value)
+        if ($isLocal -and $localAccounts.ContainsKey([string]$profile.SID) -and $localAccounts[[string]$profile.SID] -ieq 'defaultuser0') { $reason='Windows setup profile' }
+        if ($reason) { $excluded[$reason]=1+[int]$excluded[$reason]; continue }
+        $inspection=Get-SfsuProfilePathInspection ([string]$profile.LocalPath)
+        $folderName=[IO.Path]::GetFileName($inspection.Path.TrimEnd('\'))
+        if ($folderName -ieq 'defaultuser0') { $reason='Windows setup profile' }
+        elseif ($inspection.Status -eq 'Missing') { $reason='Missing profile directory' }
+        elseif ($inspection.Status -eq 'Linked') { $reason='Linked profile directory or ancestor' }
+        elseif ($inspection.Status -eq 'Invalid') { $reason='Invalid registered profile directory' }
+        if ($reason) { $excluded[$reason]=1+[int]$excluded[$reason]; continue }
+        if ($null -ne $Run -and $inspection.Status -eq 'AccessUnverified') {
+            Write-SfsuLogEvent -Run $Run -StepId profiles -Severity WARNING -Message $inspection.Message -Details ('Registered profile: '+$inspection.Path) -NextAction 'Check source-profile access before capture; this is not evidence of a directory link.'
+        }
+        $accountType='Domain'; $id=''; $accountName=$folderName; $idSource='Unavailable'
         if ($isLocal) {
             $accountType='Local'; $idSource='NotApplicable'
             if ($localAccounts.ContainsKey([string]$profile.SID) -and $localAccounts[[string]$profile.SID]) { $accountName=$localAccounts[[string]$profile.SID] }
-        } elseif ($folder.Name -match '^p?\d{1,32}$') { $id=$folder.Name; $idSource='ProfileDirectory' }
+        } else { $id=Get-SfsuProfileFolderId $inspection.Path; if ($id) { $idSource='ProfileDirectory' } }
         [pscustomobject]@{
-            ProfileSid = [string]$profile.SID; ProfilePath = $folder.FullName; Loaded = [bool]$profile.Loaded
+            ProfileSid = [string]$profile.SID; ProfilePath = $inspection.Path; Loaded = [bool]$profile.Loaded
+            PathAccessStatus=$inspection.Status; PathAccessMessage=$inspection.Message
             AccountType=$accountType; AccountName=$accountName; SfsuIdSource=$idSource
             SfsuId = $id; DisplayName = ''; SamAccountName = ''; UserPrincipalName = ''; DirectorySid = ''
             IdentitySource = 'Unresolved'; IdentityStatus = 'Not looked up'; VerifiedAtUtc = ''; ManualConfirmed = $false
         }
     }
+    if ($null -ne $Run) {
+        foreach ($reason in @($excluded.Keys | Sort-Object)) {
+            Write-SfsuLogEvent -Run $Run -StepId profiles -Message ('Excluded profiles: '+$reason+'; count='+$excluded[$reason]+'.')
+        }
+    }
+}
+
+function Get-SfsuProfileFolderId([string]$Path) {
+    $leaf=Split-Path $Path -Leaf
+    # Windows adds .DOMAIN and/or a numeric collision suffix. The base ID must
+    # still agree with the exact-SID directory record; arbitrary mismatches fail.
+    if ($leaf -match '^(p?\d{1,32})(?:\.(?:[a-zA-Z][a-zA-Z0-9_-]{0,62})(?:\.\d{3,})?|\.\d{3,})?$') { return $Matches[1] }
+    ''
+}
+
+function Assert-SfsuDirectoryCredential($Credential) {
+    if ($null -eq $Credential) { throw 'AD requires explicit standard SFSU credentials; default Windows credentials are not used.' }
+    [void](ConvertTo-SfsuLogin $Credential.UserName)
 }
 
 # Retained for callers that explicitly request domain candidates only.
@@ -54,6 +124,7 @@ function Get-SfsuWindowsIdentityName {
 
 function Open-SfsuLoggedDirectorySession {
     param($Run, [string]$StepId, [string]$Server, [System.Management.Automation.PSCredential]$Credential)
+    Assert-SfsuDirectoryCredential $Credential
     $windowsAccount = 'Unavailable'
     try { $windowsAccount = Get-SfsuWindowsIdentityName } catch { }
     $source = 'Default Windows credentials'
@@ -68,7 +139,7 @@ function Open-SfsuLoggedDirectorySession {
     # PSCredential, SecureString, NetworkCredential, or password into the journal.
     $details = @(
         ('LDAP endpoint: ' + $Server + ':389'),
-        'Authentication: Negotiate; signing and sealing enabled',
+        'Authentication policy: Kerberos only; signing and sealing required; no NTLM fallback',
         ('Credential source: ' + $source),
         ('Attempted LDAP account: ' + $account),
         ('Windows execution identity: ' + $windowsAccount),
@@ -83,17 +154,9 @@ function Open-SfsuLoggedDirectorySession {
 
 function New-SfsuDirectorySession {
     param([string]$Server = 'ad.sfsu.edu', [System.Management.Automation.PSCredential]$Credential)
-    if ($Server -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*$') { throw 'Use an LDAP server DNS name without a path or port.' }
-    $identifier = New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($Server, 389, $false, $false)
-    $connection = New-Object System.DirectoryServices.Protocols.LdapConnection($identifier)
+    Assert-SfsuDirectoryCredential $Credential
+    $connection = New-SfsuLdapConnection $Server $Credential
     try {
-        $connection.AuthType = [System.DirectoryServices.Protocols.AuthType]::Negotiate
-        if ($null -ne $Credential) { $connection.Credential = $Credential.GetNetworkCredential() }
-        $connection.Timeout = [TimeSpan]::FromSeconds(8)
-        $connection.SessionOptions.ProtocolVersion = 3
-        $connection.SessionOptions.Signing = $true
-        $connection.SessionOptions.Sealing = $true
-        $connection.SessionOptions.ReferralChasing = [System.DirectoryServices.Protocols.ReferralChasingOptions]::None
         $connection.Bind()
         $request = New-Object System.DirectoryServices.Protocols.SearchRequest
         $request.DistinguishedName = ''
@@ -107,6 +170,23 @@ function New-SfsuDirectorySession {
             throw 'The server did not return a default naming context.'
         }
         [pscustomobject]@{ Connection = $connection; SearchBase = [string]$response.Entries[0].Attributes['defaultNamingContext'][0]; Server = $Server }
+    } catch { $connection.Dispose(); throw }
+}
+
+function New-SfsuLdapConnection([string]$Server,$Credential) {
+    Assert-SfsuDirectoryCredential $Credential
+    if ($Server -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*$') { throw 'Use an LDAP server DNS name without a path or port.' }
+    $identifier = New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($Server, 389, $false, $false)
+    $connection = New-Object System.DirectoryServices.Protocols.LdapConnection($identifier)
+    try {
+        $connection.AuthType = [System.DirectoryServices.Protocols.AuthType]::Kerberos
+        $connection.Credential = [Net.NetworkCredential]::new((ConvertTo-SfsuLogin $Credential.UserName),$Credential.Password)
+        $connection.Timeout = [TimeSpan]::FromSeconds(8)
+        $connection.SessionOptions.ProtocolVersion = 3
+        $connection.SessionOptions.Signing = $true
+        $connection.SessionOptions.Sealing = $true
+        $connection.SessionOptions.ReferralChasing = [System.DirectoryServices.Protocols.ReferralChasingOptions]::None
+        $connection
     } catch { $connection.Dispose(); throw }
 }
 
@@ -135,7 +215,6 @@ function Get-SfsuDirectoryRecords {
 
 function Resolve-SfsuProfileIdentity {
     param($Profile, $Session)
-    if ($Profile.SfsuId -notmatch '^p?\d{1,32}$') { $Profile.IdentityStatus='SFSU ID unavailable in profile directory'; return $Profile }
     $records = @(Get-SfsuDirectoryRecords -Session $Session -Sid $Profile.ProfileSid)
     $Profile.IdentitySource = 'Unresolved'; $Profile.IdentityStatus = 'Account not found'
     if ($records.Count -gt 1) { $Profile.IdentityStatus = 'Conflicting directory matches'; return $Profile }
@@ -147,6 +226,9 @@ function Resolve-SfsuProfileIdentity {
     $Profile.UserPrincipalName = $record.UserPrincipalName
     # No hard-coded nine-digit rule until account-format exceptions are confirmed.
     if ($record.SamAccountName -notmatch '^p?\d{1,32}$') { $Profile.IdentityStatus = 'SFSU ID unavailable'; return $Profile }
+    $folderId=Get-SfsuProfileFolderId $Profile.ProfilePath
+    if (-not $folderId) { $Profile.IdentityStatus='SFSU ID unavailable in profile directory'; return $Profile }
+    if ($folderId -cne $record.SamAccountName) { $Profile.IdentityStatus='Directory ID conflict with profile directory'; return $Profile }
     if ($Profile.SfsuId -and $Profile.SfsuId -cne $record.SamAccountName) { $Profile.IdentityStatus='Directory ID conflict with profile directory'; return $Profile }
     $Profile.SfsuId = $record.SamAccountName
     if ([string]::IsNullOrWhiteSpace($record.DisplayName)) { $Profile.IdentityStatus = 'Display name unavailable'; return $Profile }
@@ -159,6 +241,8 @@ function Resolve-SfsuProfileIdentity {
 function Get-SfsuLookupFailure($Failure) {
     $exception = $Failure.Exception
     while ($null -ne $exception.InnerException) { $exception = $exception.InnerException }
+    if ($exception.Message -like '*Power-user accounts cannot connect*') { return 'Power-user accounts cannot connect to AD; use your standard SFSU account' }
+    if ($exception.Message -like '*AD requires explicit standard*') { return 'Standard SFSU credentials required; automatic Windows authentication is disabled' }
     if ($exception -is [System.DirectoryServices.Protocols.LdapException]) {
         if ($exception.ErrorCode -eq 49) { return 'Authentication failed' }
         if ($exception.ErrorCode -in @(81,85,91)) { return 'Directory unreachable or timed out' }
@@ -169,10 +253,11 @@ function Get-SfsuLookupFailure($Failure) {
 
 function ConvertTo-SfsuLogin([string]$UserName) {
     $value = $UserName.Trim()
-    if ($value -match '^p?\d{1,32}$') { return ($value + '@sfsu.edu') }
-    if ($value -match '^p?\d{1,32}@sfsu\.edu$') { return $value }
+    if ($value -match '^p\d') { throw 'Power-user accounts cannot connect to AD. Use your standard numeric SFSU ID; p-account profiles can still be selected for migration.' }
+    if ($value -match '^\d{1,32}$') { return ($value + '@sfsu.edu') }
+    if ($value -match '^\d{1,32}@sfsu\.edu$') { return $value }
     if ($value.Contains('@')) { throw 'Enter your SFSU ID, not your email address.' }
-    throw 'Enter your numeric SFSU ID or p-prefixed power-user ID, optionally followed by @sfsu.edu.'
+    throw 'Enter your standard numeric SFSU ID, optionally followed by @sfsu.edu.'
 }
 
 function Invoke-SfsuDirectoryAuthentication {
@@ -201,7 +286,7 @@ function Set-SfsuManualIdentity {
     if ($Profile.IdentityStatus -match 'conflict') { throw 'Resolve the directory identity conflict before preparing this profile.' }
     $id=''
     if ($Profile.AccountType -eq 'Domain') {
-        $id=Split-Path $Profile.ProfilePath -Leaf
+        $id=Get-SfsuProfileFolderId $Profile.ProfilePath
         if ($id -notmatch '^p?\d{1,32}$') { throw 'Cannot infer an SFSU ID from this domain profile directory. Resolve the profile identity before assigning a name.' }
     } elseif ($Profile.AccountType -ne 'Local' -or [string]::IsNullOrWhiteSpace($Profile.AccountName)) { throw 'Profile account type/name is unresolved.' }
     if (-not $Confirmed -or [string]::IsNullOrWhiteSpace($DisplayName)) {
@@ -224,8 +309,8 @@ function Invoke-SfsuProfileDiscovery {
     $session = $null
     try {
         Start-SfsuLogStep -Run $run -StepId profiles
-        $profiles = @(Get-SfsuProfiles)
-        Write-SfsuCheckpoint -Run $run -StepId profiles -Status Passed -Message ("Found $($profiles.Count) existing domain/local account profile directories using Win32_UserProfile and local account SID prefixes.")
+        $profiles = @(Get-SfsuProfiles -Run $run)
+        Write-SfsuCheckpoint -Run $run -StepId profiles -Status Passed -Message ("Listed $($profiles.Count) registered domain/local profiles using Win32_UserProfile and local account SID prefixes. Source file-list/read access was not tested.")
         Complete-SfsuLogStep -Run $run -StepId profiles -Status Passed -Message 'System profiles, defaultuser0, missing directories, and directory links were excluded; other local accounts were retained.'
         Start-SfsuLogStep -Run $run -StepId lookup
         $directoryStatus = 'No domain profiles to look up'
@@ -236,7 +321,7 @@ function Invoke-SfsuProfileDiscovery {
             try {
                 $session = Open-SfsuLoggedDirectorySession -Run $run -StepId lookup -Server $Server -Credential $Credential
                 $directoryStatus = 'Connected'
-                Write-SfsuLogEvent -Run $run -StepId lookup -Message "Connected to $Server with signed/sealed Windows LDAP authentication."
+                Write-SfsuLogEvent -Run $run -StepId lookup -Message "Connected to $Server. Kerberos-only bind and RootDSE query succeeded with signing/sealing required by the client."
             } catch {
                 $directoryStatus = Get-SfsuLookupFailure $_
                 Write-SfsuLogEvent -Run $run -StepId lookup -Severity WARNING -Message $directoryStatus -NextAction 'Use Directory credentials to retry, or explicitly confirm a manual identity.'
@@ -276,6 +361,7 @@ function ConvertTo-SfsuFolderPart([string]$Value, [int]$Limit) {
 }
 
 function Assert-SfsuPlainDirectory([string]$Path) {
+    [void](Assert-SfsuSafePath $Path)
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw 'A regular directory is required; directory links are not supported.'
@@ -288,15 +374,20 @@ function New-SfsuPreparedBackup {
     if ($Profile.IdentitySource -notin @('LDAP','Manual') -or $Profile.IdentityStatus -match 'conflict' -or
         [string]::IsNullOrWhiteSpace($Profile.DisplayName)) { throw 'Resolve or confirm this profile identity before preparing a folder.' }
     if ($Profile.AccountType -eq 'Domain') {
-        if ($Profile.SfsuId -notmatch '^p?\d{1,32}$' -or $Profile.SfsuId -cne (Split-Path $Profile.ProfilePath -Leaf)) { throw 'The domain SFSU ID must match the profile directory.' }
+        if ($Profile.SfsuId -notmatch '^p?\d{1,32}$' -or $Profile.SfsuId -cne (Get-SfsuProfileFolderId $Profile.ProfilePath)) { throw 'The domain SFSU ID must match the profile directory base ID.' }
     } elseif ($Profile.AccountType -eq 'Local') {
         if ($Profile.SfsuId -or [string]::IsNullOrWhiteSpace($Profile.AccountName) -or $Profile.IdentitySource -ne 'Manual' -or $Profile.DirectorySid) { throw 'Local accounts require a confirmed display name and local account identity, without an SFSU ID or AD identity.' }
     } else { throw 'Unknown profile account type.' }
     if ($Profile.IdentitySource -eq 'Manual' -and -not $Profile.ManualConfirmed) { throw 'Manual identity confirmation is required.' }
     if ($Profile.IdentitySource -eq 'LDAP' -and ($Profile.DirectorySid -ne $Profile.ProfileSid -or $Profile.SamAccountName -cne $Profile.SfsuId -or -not $Profile.VerifiedAtUtc)) { throw 'Directory identity does not match the source profile SID/account ID.' }
     if ($Profile.ProfileSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'A user-account profile SID is required.' }
-    [void](Assert-SfsuPlainDirectory $Profile.ProfilePath)
+    $sourceInspection=Get-SfsuProfilePathInspection $Profile.ProfilePath
+    if ($sourceInspection.Status -ne 'Ready') { throw ('Cannot prepare this source profile: '+$sourceInspection.Message) }
     $root = Join-Path $PackageRoot 'Backups'
+    [void](Assert-SfsuSafePath $root -AllowMissing)
+    $rootGuard=Enter-SfsuPathGuard $root
+    $destinationGuard=$null
+    try {
     [void][IO.Directory]::CreateDirectory($root)
     $root = Assert-SfsuPlainDirectory $root
     if ($Profile.AccountType -eq 'Local') { $id=ConvertTo-SfsuFolderPart ('Local-'+$Profile.AccountName) 40 }
@@ -330,6 +421,7 @@ namespace Sfsu {
     }
     # Atomic mkdir fails on existing paths, including concurrent starts. No overwrite or merge.
     [Sfsu.DirectoryReservation]::Reserve($destination)
+    $destinationGuard=Enter-SfsuPathGuard $destination
     $manifest = [ordered]@{
         SchemaVersion=2; Kind='SfsuUsmtBackup'; Status='PreparedOnly'; HasMigrationData=$false
         CreatedUtc=$Timestamp.ToUniversalTime().ToString('o'); CreatedPacific=$pacific.ToString('o')
@@ -342,9 +434,10 @@ namespace Sfsu {
     }
     $manifestPath = Join-Path $destination 'backup.json'
     $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes((ConvertTo-Json $manifest -Depth 8))
-    $stream = New-Object IO.FileStream($manifestPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $stream = [Sfsu.SafeFiles]::Open($manifestPath,$true,$true)
     try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
     [pscustomobject]@{ Path=$destination; Manifest=$manifest }
+    } finally { if ($destinationGuard) { $destinationGuard.Dispose() }; $rootGuard.Dispose() }
 }
 
 function Invoke-SfsuBackupPreparation {
@@ -376,11 +469,17 @@ function Invoke-SfsuBackupPreparation {
 }
 
 function Read-SfsuBackupManifest([string]$Path) {
+    $guard=Enter-SfsuPathGuard $Path
+    try {
     [void](Assert-SfsuPlainDirectory $Path)
+    [void](Assert-SfsuSafePath (Join-Path $Path 'backup.json'))
     $file = Get-Item -LiteralPath (Join-Path $Path 'backup.json') -Force -ErrorAction Stop
     if ($file.Length -gt 1MB -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Unsafe or oversized backup metadata.' }
-    $data = ConvertFrom-Json ([IO.File]::ReadAllText($file.FullName)) -ErrorAction Stop
-    if ($data.SchemaVersion -notin @(1,2) -or $data.Kind -ne 'SfsuUsmtBackup' -or $data.Status -ne 'PreparedOnly' -or $data.HasMigrationData -ne $false) {
+    $stream=[Sfsu.SafeFiles]::Open($file.FullName,$false,$false)
+    if ($stream.Length -gt 1MB) { $stream.Dispose(); throw 'Unsafe or oversized backup metadata.' }
+    $reader=New-Object IO.StreamReader($stream)
+    try { $data = ConvertFrom-Json ($reader.ReadToEnd()) -ErrorAction Stop } finally { $reader.Dispose() }
+    if ($data.SchemaVersion -notin @(1,2) -or $data.Kind -ne 'SfsuUsmtBackup' -or $data.Status -ne 'PreparedOnly' -or $data.HasMigrationData -isnot [bool] -or $data.HasMigrationData -ne $false) {
         throw 'Unrecognized backup metadata/version/status.'
     }
     if ($data.SchemaVersion -eq 1) {
@@ -388,14 +487,30 @@ function Read-SfsuBackupManifest([string]$Path) {
         $data.Identity | Add-Member NoteProperty AccountName ([string]$data.Identity.SfsuId) -Force
         $data.Identity | Add-Member NoteProperty SfsuIdSource 'LegacyMetadata' -Force
     }
-    if ($data.SchemaVersion -eq 2 -and $data.SourceProfile.Sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'Missing source account SID.' }
+    if ($data.SourceProfile.Sid -isnot [string] -or $data.SourceProfile.Sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'Missing source account SID.' }
     if ($data.Identity.AccountType -eq 'Local') {
         if ($data.Identity.SfsuId -or [string]::IsNullOrWhiteSpace($data.Identity.AccountName) -or $data.Identity.DirectorySid -or $data.Identity.Source -ne 'Manual' -or $data.Identity.ManualConfirmed -ne $true) { throw 'Invalid local-account identity metadata.' }
     } elseif ($data.Identity.AccountType -ne 'Domain' -or $data.Identity.SfsuId -notmatch '^p?\d{1,32}$') { throw 'Invalid domain identity metadata.' }
     if ([string]::IsNullOrWhiteSpace($data.Identity.DisplayName) -or
         $data.Identity.Source -notin @('LDAP','Manual') -or [string]::IsNullOrWhiteSpace($data.SourceComputer)) { throw 'Missing identity metadata.' }
+    foreach ($property in @('DisplayName','AccountName','SfsuId','DirectorySid','SamAccountName','UserPrincipalName','VerifiedAtUtc')) {
+        $value=$data.Identity.$property
+        if ($value -isnot [string] -or $value.Length -gt 1024 -or $value -match '[\x00-\x1f]') { throw 'Invalid identity text.' }
+    }
+    foreach ($value in @($data.SourceComputer,$data.SourceProfile.Path)) {
+        if ($value -isnot [string] -or $value.Length -gt 1024 -or $value -match '[\x00-\x1f]') { throw 'Invalid identity text.' }
+    }
+    if ($data.Identity.Source -eq 'Manual' -and ($data.Identity.ManualConfirmed -isnot [bool] -or -not $data.Identity.ManualConfirmed -or $data.Identity.DirectorySid -or $data.Identity.SamAccountName -or $data.Identity.UserPrincipalName -or $data.Identity.VerifiedAtUtc)) { throw 'Inconsistent saved manual identity.' }
+    if ($data.Identity.AccountType -eq 'Domain') {
+        if ($data.Identity.SfsuId -cne (Get-SfsuProfileFolderId $data.SourceProfile.Path)) { throw 'Saved ID does not match the source profile directory base ID.' }
+        if ($data.Identity.Source -eq 'LDAP') {
+            if ($data.Identity.DirectorySid -ne $data.SourceProfile.Sid -or $data.Identity.SamAccountName -cne $data.Identity.SfsuId -or -not $data.Identity.VerifiedAtUtc) { throw 'Inconsistent saved directory identity.' }
+            [void][DateTimeOffset]::Parse($data.Identity.VerifiedAtUtc,[Globalization.CultureInfo]::InvariantCulture)
+        } elseif ($data.Identity.ManualConfirmed -isnot [bool] -or -not $data.Identity.ManualConfirmed -or $data.Identity.DirectorySid -or $data.Identity.SamAccountName -or $data.Identity.VerifiedAtUtc) { throw 'Inconsistent saved manual identity.' }
+    }
     $created = [DateTimeOffset]::Parse($data.CreatedUtc, [Globalization.CultureInfo]::InvariantCulture)
     [pscustomobject]@{ Data=$data; Created=$created }
+    } finally { $guard.Dispose() }
 }
 
 function Get-SfsuBackupCatalog {
@@ -403,7 +518,9 @@ function Get-SfsuBackupCatalog {
     $root = Join-Path $PackageRoot 'Backups'
     if (-not (Test-Path -LiteralPath $root)) { return }
     [void](Assert-SfsuPlainDirectory $root)
-    foreach ($folder in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop)) {
+    $count=0
+    foreach ($folder in Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop) {
+        $count++; if ($count -gt 10000) { throw 'Backup listing exceeds the 10,000-folder safety limit.' }
         $row = [ordered]@{ Path=$folder.FullName; AccountType='Unknown'; AccountName=''; SfsuId=''; DisplayName=$folder.Name; SourceComputer=''
             CreatedUtc=[DateTimeOffset]::MinValue; Timestamp=''; Status='Unrecognized / incomplete folder'; IdentitySource='Unknown'
             DirectorySid=''; FormerName=''; MetadataValid=$false }
@@ -482,4 +599,4 @@ function Invoke-SfsuRestoreReview {
 
 Export-ModuleMember -Function Get-SfsuProfiles, Get-SfsuDomainProfiles, Set-SfsuManualIdentity, Invoke-SfsuProfileDiscovery,
     Invoke-SfsuBackupPreparation, Get-SfsuBackupCatalog, Invoke-SfsuBackupInventory, Invoke-SfsuRestoreReview,
-    ConvertTo-SfsuLogin, Invoke-SfsuDirectoryAuthentication
+    ConvertTo-SfsuLogin, Invoke-SfsuDirectoryAuthentication, Get-SfsuProfileFolderId

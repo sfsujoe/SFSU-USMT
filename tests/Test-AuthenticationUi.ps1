@@ -66,14 +66,18 @@ try {
                     } else {
                         $s.User.Text='000000123'
                         if ($c.Kind -eq 'power-full') { $s.User.Text='p000000123@sfsu.edu' }
-                        elseif ($c.Kind -eq 'accept-flow') { $s.User.Text='p000000123' }
+                        elseif ($c.Kind -eq 'accept-flow') { $s.User.Text='000000123' }
                         if ($c.Kind -eq 'retry') { $s.Password.Text='wrong' }
                         elseif ($c.Kind -eq 'cancel') { $s.Password.Text='wait' }
                         else { $s.Password.Text='synthetic-good-password' }
                         $s.Authenticate.PerformClick()
+                        if ($c.Kind -eq 'power-full') {
+                            Assert-True ($null -eq $s.Worker -and $s.Hint.Text -match 'Power-user accounts cannot connect') 'Power-user sign-in is blocked before LDAP starts.'
+                            $s.Continue.PerformClick(); return
+                        }
                         Assert-True ($null -ne $s.Worker -and -not $s.Authenticate.Enabled -and -not $s.Password.Text) 'Authentication runs in the background with double submission disabled and the password box cleared.'
                     }
-                } elseif ($c.Kind -eq 'retry' -and $c.Stage -eq 1 -and $null -eq $s.Worker) {
+                } elseif ($c.Kind -eq 'retry' -and $c.Stage -eq 1 -and $null -eq $s.Worker -and $s.Authenticate.Enabled) {
                     Assert-True ($s.Hint.Text -match 'Authentication failed' -and -not $s.Succeeded -and $null -eq $s.Credential) 'Rejected credentials leave the dialog open for retry and discard the failed password.'
                     Assert-True ($s.Hint.Text.StartsWith(([string][char]0x26D4)+' ') -and $s.Hint.AccessibleName -eq $s.Hint.Text) 'AD failure is prefixed with the stop symbol and retains accessible error text.'
                     $bitmap=New-Object Drawing.Bitmap($s.Form.Width,$s.Form.Height)
@@ -95,7 +99,7 @@ try {
                 function Start-SfsuUiTask { param($Action,$Items) $script:AuthenticatedAction=$Action }
                 try { Show-SfsuDirectoryCredentials }
                 finally { Set-Item function:New-SfsuAuthenticationDialog $savedDialogFunction; Set-Item function:Start-SfsuUiTask $savedStartFunction }
-                Assert-True ($script:SfsuUi.UseDirectory -and $script:SfsuUi.Credential.UserName -eq 'p000000123@sfsu.edu' -and $script:AuthenticatedAction -eq 'Discover profiles') 'Verified power-user credentials transfer into app state with their prefix before discovery starts.'
+                Assert-True ($script:SfsuUi.UseDirectory -and $script:SfsuUi.Credential.UserName -eq '000000123@sfsu.edu' -and $script:AuthenticatedAction -eq 'Discover profiles') 'Verified standard-account credentials transfer into app state before discovery starts.'
                 Assert-True ($script:SfsuUi.Credential.GetNetworkCredential().Password -eq 'synthetic-good-password') 'Dialog disposal does not dispose the successfully transferred app-session credential.'
             } else { $result=$dialog.ShowDialog($main) }
             if ($script:AuthCase.Error) { throw $script:AuthCase.Error }
@@ -105,7 +109,7 @@ try {
                 Assert-True (Test-Path -LiteralPath $dialog.Tag.ReportPath) 'The verified authentication has its own real report.'
                 Assert-True (-not [IO.File]::ReadAllText($dialog.Tag.ReportPath).Contains('synthetic-good-password')) 'Authentication reports do not contain the submitted password.'
             } elseif ($case -eq 'power-full') {
-                Assert-True ($result -eq 'OK' -and $dialog.Tag.Succeeded -and $dialog.Tag.Credential.UserName -ceq 'p000000123@sfsu.edu') 'The full power-user login authenticates without adding a second suffix.'
+                Assert-True ($result -eq 'Cancel' -and -not $dialog.Tag.Succeeded -and $null -eq $dialog.Tag.Credential) 'A rejected power-user login never becomes an authenticated session.'
             } elseif ($case -ne 'accept-flow') {
                 Assert-True ($result -eq 'Cancel' -and -not $dialog.Tag.Succeeded -and $null -eq $dialog.Tag.Credential) 'Continue without AD never returns an authenticated credential, including during an active attempt.'
             }

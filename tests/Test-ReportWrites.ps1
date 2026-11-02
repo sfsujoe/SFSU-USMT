@@ -44,11 +44,12 @@ public static class SfsuReportIoFixture {
 }
 '@
 $source = [IO.File]::ReadAllText((Join-Path $repository 'App/Scripts/Sfsu.Logging.psm1'))
-foreach ($method in @('Replace','Copy')) {
+foreach ($method in @('Replace')) {
     $call = '[System.IO.File]::' + $method + '('
     if ([regex]::Matches($source, [regex]::Escape($call)).Count -ne 1) { throw ('Review filesystem injection point: ' + $method) }
     $source = $source.Replace($call, ('[SfsuReportIoFixture]::' + $method + '('))
 }
+$source=$source.Replace('Copy-SfsuReportFile $temporary $Path','[SfsuReportIoFixture]::Copy($temporary,$Path,$true)')
 $modulePath = Join-Path $testRoot 'App/Scripts/Sfsu.Logging.psm1'
 [IO.File]::WriteAllText($modulePath, $source)
 $module = Import-Module $modulePath -Force -PassThru
@@ -89,7 +90,7 @@ $previousHtml = [IO.File]::ReadAllText($blocked.ReportPath)
 [SfsuReportIoFixture]::BlockCopy = $true
 [SfsuReportIoFixture]::CopyCalls = 0
 $failureText = ''
-try { Write-SfsuLogEvent -Run $blocked -Message 'Evidence retained through a report failure.' }
+try { Write-SfsuLogEvent -Run $blocked -Severity ERROR -Message 'Evidence retained through a report failure.' }
 catch { $failureText = $_.Exception.Message }
 Assert-True ($failureText.Contains('Could not update the HTML report') -and $failureText.Contains('events.jsonl') -and $failureText.Contains('Synthetic overwrite access denied')) 'Persistent write denial explains the failed report, preserved journal, and original error.'
 Assert-True ([SfsuReportIoFixture]::CopyCalls -eq 3) 'Persistent overwrite denial stops after three attempts.'

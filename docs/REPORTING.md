@@ -102,3 +102,11 @@ The report-write suite injects filesystem failures while using real isolated jou
 `tests/Test-ReportBrowser.cjs` uses Playwright with installed Microsoft Edge. Supply a Failed sample HTML file and an artifact directory. It tests sorting, search, filters, printing, offline links/assets, narrow screens, and JavaScript-disabled reading. Test tools are development dependencies only; technicians need neither Node.js nor Playwright.
 
 Runtime Backups, Logs, test artifacts, and the locally supplied `App/User State Migration Tool/` ADK payload are Git-ignored. The source includes the logo under `App/Assets/`; the reporting preview works without ADK binaries. Tool updates should replace the launcher and App without replacing Backups or Logs. No migration executable is run during report validation.
+
+## Security and bounded processing
+
+The D43 security pass flushes every journal event immediately, caches validated event state, and throttles ordinary-message HTML rebuilding to one second; checkpoints, errors and lifecycle boundaries still render immediately. A copied logo.png beside the journal supports portable rebuilding; HTML remains self-contained and old Base64-header journals remain readable. Limits are 32 MB/journal, 1 MB/record and 20,000 records. Limit failures preserve evidence rather than dropping events or claiming success.
+
+Native path guards and file opens reject directory/leaf reparse points and file hard links, hold ancestor directories against replacement during guarded operations, and safely create snapshot files without overwrite. The copy fallback opens and validates its target before truncation. These protections require representative SMB/filesystem acceptance tests. They do not make editable records cryptographically authentic.
+
+See [Security and maintenance](SECURITY.md) for explicit preview/apply root-log retention, filesystem ACL screening, credential limitations and future USMT key-file requirements. No automatic cleanup or employee-backup deletion is performed. The synthetic security suite is `tests/Test-Security.ps1`.

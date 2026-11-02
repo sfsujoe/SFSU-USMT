@@ -6,6 +6,11 @@ param(
     [string]$RebuildReport = '',
     [string]$LdapServer = 'ad.sfsu.edu',
     [switch]$DiscoverProfiles,
+    [System.Management.Automation.PSCredential]$DirectoryCredential,
+    [switch]$ReviewStorageAccess,
+    [ValidateRange(1,3650)][int]$LogRetentionDays=30,
+    [switch]$PreviewLogRetention,
+    [switch]$ApplyLogRetention,
     [switch]$BuildUiOnly
 )
 
@@ -79,13 +84,20 @@ function New-SfsuSampleReport {
 
 try {
     Import-Module (Join-Path $PSScriptRoot 'Sfsu.Logging.psm1') -Force
+    if ($ReviewStorageAccess -or $PreviewLogRetention -or $ApplyLogRetention) {
+        if ($DiscoverProfiles -or $Headless -or $RebuildReport -or $BuildUiOnly -or $DirectoryCredential -or $SnapshotBackupPath) { throw 'Run package maintenance separately from application actions.' }
+        Import-Module (Join-Path $PSScriptRoot 'Sfsu.Maintenance.psm1') -Force
+        if ($ReviewStorageAccess) { Get-SfsuStorageAccessReview $packageRoot }
+        if ($PreviewLogRetention -or $ApplyLogRetention) { Invoke-SfsuLogRetention -PackageRoot $packageRoot -Days $LogRetentionDays -Apply:$ApplyLogRetention }
+        exit 0
+    }
     if ($RebuildReport) {
         Update-SfsuLogReport -RunDirectory $RebuildReport
         exit 0
     }
     if ($DiscoverProfiles) {
         Import-Module (Join-Path $PSScriptRoot 'Sfsu.Inventory.psm1') -Force
-        $discovery = Invoke-SfsuProfileDiscovery -PackageRoot $packageRoot -Server $LdapServer
+        $discovery = Invoke-SfsuProfileDiscovery -PackageRoot $packageRoot -Server $LdapServer -Credential $DirectoryCredential -SkipDirectoryLookup:($null -eq $DirectoryCredential)
         Write-Output $discovery.ReportPath
         exit 0
     }
@@ -102,6 +114,7 @@ try {
     $failureText = $_.Exception.ToString()
     try {
         $logsPath = Join-Path $packageRoot 'Logs'
+        if (Get-Command Assert-SfsuSafePath -ErrorAction SilentlyContinue) { [void](Assert-SfsuSafePath $logsPath -AllowMissing) }
         [void][System.IO.Directory]::CreateDirectory($logsPath)
         $failurePath = Join-Path $logsPath ('startup-' + [guid]::NewGuid().ToString('N') + '.txt')
         [System.IO.File]::WriteAllText($failurePath, $failureText)

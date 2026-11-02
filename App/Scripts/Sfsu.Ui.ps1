@@ -6,6 +6,7 @@ Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 $appearancePreference=Read-SfsuAppearancePreference $packageRoot
 $script:SfsuUi = @{ Root=$packageRoot; Worker=$null; Pending=$null; Credential=$null; UseDirectory=$false; LatestReport=''; CloseWhenDone=$false; Cancelled=$false; Logo=$null
+    DirectoryLastUsedUtc=[DateTime]::MinValue; CredentialIdleMinutes=10
     ThemeId=$appearancePreference.ThemeId; TextScale=$appearancePreference.TextScale; PreferenceWarning=$appearancePreference.Warning; PreviewTheme=''; PreviewTextScale=0; Palette=$null; AppearanceSignature=''
     Dialogs=(New-Object 'Collections.Generic.List[Windows.Forms.Form]'); GridFontScale=0
     MainLayout=[pscustomobject]@{Interactive=$false;Busy=$false;Signature=''} }
@@ -199,7 +200,7 @@ function Test-SfsuProfileVerified($Profile) {
     $Profile.AccountType -eq 'Domain' -and $Profile.IdentitySource -eq 'LDAP' -and
         $Profile.IdentityStatus -eq 'Directory verified' -and $Profile.VerifiedAtUtc -and
         $Profile.DirectorySid -eq $Profile.ProfileSid -and $Profile.SfsuId -match '^p?\d{1,32}$' -and
-        $Profile.SfsuId -ceq $Profile.SamAccountName -and $Profile.SfsuId -ceq (Split-Path $Profile.ProfilePath -Leaf) -and
+        $Profile.SfsuId -ceq $Profile.SamAccountName -and $Profile.SfsuId -ceq (Get-SfsuProfileFolderId $Profile.ProfilePath) -and
         -not [string]::IsNullOrWhiteSpace($Profile.DisplayName)
 }
 
@@ -213,6 +214,7 @@ function Set-SfsuProfileRows([object[]]$Profiles) {
         $index=$grid.Rows.Add([object[]]@($false,$idLabel,$verified,$profile.DisplayName,$profile.ProfilePath,$profile.IdentityStatus,$profile.ProfileSid))
         $grid.Rows[$index].Tag=$profile
         $grid.Rows[$index].Cells['Sid'].ToolTipText=$profile.ProfileSid
+        if ($profile.PSObject.Properties['PathAccessMessage']) { $grid.Rows[$index].Cells['ProfilePath'].ToolTipText=$profile.PathAccessMessage }
         $verificationHint='Not verified against Active Directory.'
         if ($verified) { $verificationHint='AD verified: profile SID, SFSU ID, and display name.' }
         elseif ($profile.AccountType -eq 'Local') { $verificationHint='Local account; AD verification does not apply.' }
@@ -245,12 +247,30 @@ function Show-SfsuMessage([string]$Text) {
     [void][Windows.Forms.MessageBox]::Show($script:SfsuUi.Form,$Text,'SFSU USMT','OK','Information')
 }
 
+function Clear-SfsuDirectoryCredential {
+    if ($null -ne $script:SfsuUi.Credential) { $script:SfsuUi.Credential.Password.Dispose(); $script:SfsuUi.Credential=$null }
+    $script:SfsuUi.UseDirectory=$false
+    $script:SfsuUi.DirectoryLastUsedUtc=[DateTime]::MinValue
+}
+
+function Test-SfsuCredentialExpiry([DateTime]$Now=[DateTime]::UtcNow) {
+    if ($null -eq $script:SfsuUi.Worker -and $null -ne $script:SfsuUi.Credential -and
+        ($Now-$script:SfsuUi.DirectoryLastUsedUtc).TotalMinutes -ge $script:SfsuUi.CredentialIdleMinutes) {
+        Clear-SfsuDirectoryCredential
+        $script:SfsuUi.Status.Text='AD credentials cleared after ten minutes without directory activity. Use Directory credentials to reconnect, or continue manually.'
+        return $true
+    }
+    $false
+}
+
 function Start-SfsuUiTask([string]$Action, [object[]]$Items=@()) {
     if ($null -ne $script:SfsuUi.Worker) { return }
+    [void](Test-SfsuCredentialExpiry)
     if ($Action -eq 'Refresh current names' -and -not $script:SfsuUi.UseDirectory) { Show-SfsuDirectoryCredentials; return }
     $script:SfsuUi.Tabs.Enabled=$false; $script:SfsuUi.Cancel.Enabled=$true; $script:SfsuUi.Cancelled=$false
     $script:SfsuUi.Status.Text='Working: ' + $Action + '. You can cancel; interrupted work remains documented as incomplete.'
     $script:SfsuUi.Action=$Action
+    if ($script:SfsuUi.UseDirectory -and $Action -in @('Discover profiles','Refresh current names')) { $script:SfsuUi.DirectoryLastUsedUtc=[DateTime]::UtcNow }
     $worker=[PowerShell]::Create()
     $task={
         param($root,$action,$items,$credential,$server,$useDirectory)
@@ -284,7 +304,7 @@ function New-SfsuAuthenticationDialog {
     $hint=New-Object Windows.Forms.Label; $hint.Name='AuthenticationHeading'; $hint.Text='Enter your SFSU ID and password'
     $hint.Font=New-Object Drawing.Font($dialog.Font.FontFamily,([single]($dialog.Font.SizeInPoints*1.25)),[Drawing.FontStyle]::Bold)
     $hint.SetBounds(18,16,504,30); $dialog.Controls.Add($hint)
-    $userLabel=New-Object Windows.Forms.Label; $userLabel.Text='SFSU &ID or power-user ID'; $userLabel.SetBounds(18,56,504,25); $dialog.Controls.Add($userLabel)
+    $userLabel=New-Object Windows.Forms.Label; $userLabel.Text='Standard SFSU &ID (no p-accounts)'; $userLabel.SetBounds(18,56,504,25); $dialog.Controls.Add($userLabel)
     $user=New-Object Windows.Forms.TextBox; $user.Name='SfsuLogin'; $user.SetBounds(18,84,504,28); $dialog.Controls.Add($user)
     if ($null -ne $script:SfsuUi.Credential) { $user.Text=$script:SfsuUi.Credential.UserName }
     $validation=New-Object Windows.Forms.Label; $validation.SetBounds(18,119,504,45); $dialog.Controls.Add($validation)
@@ -294,7 +314,7 @@ function New-SfsuAuthenticationDialog {
     $cancel=New-SfsuButton $dialog 'Continue without AD' 156 210 293; $cancel.DialogResult='Cancel'
     $ok=New-SfsuButton $dialog 'Authenticate' 378 144 293
     $dialog.AcceptButton=$ok; $dialog.CancelButton=$cancel
-    $state=[pscustomobject]@{Form=$dialog;User=$user;Password=$password;Heading=$hint;Purpose=$purpose;Hint=$validation;Authenticate=$ok;Continue=$cancel;Worker=$null;Pending=$null;Credential=$null;Succeeded=$false;Closing=$false;ReportPath='';Root=$script:SfsuUi.Root;Server=$LdapServer;Timer=(New-Object Windows.Forms.Timer)}
+    $state=[pscustomobject]@{Form=$dialog;User=$user;Password=$password;Heading=$hint;Purpose=$purpose;Hint=$validation;Authenticate=$ok;Continue=$cancel;Worker=$null;Pending=$null;Credential=$null;Succeeded=$false;Closing=$false;ReportPath='';Root=$script:SfsuUi.Root;Server=$LdapServer;Timer=(New-Object Windows.Forms.Timer);Failures=0;RetryAfterUtc=[DateTime]::MinValue}
     $dialog.Tag=$state; $state.Timer.Interval=100
     $user.Add_TextChanged({
         param($sender,$event)
@@ -306,11 +326,14 @@ function New-SfsuAuthenticationDialog {
         param($sender,$event)
         $s=$sender.FindForm().Tag
         if ($null -ne $s.Worker) { return }
+        if ([DateTime]::UtcNow -lt $s.RetryAfterUtc) { return }
         try { $login=ConvertTo-SfsuLogin $s.User.Text }
         catch { $s.Hint.Text=$_.Exception.Message; return }
         try {
             if (-not $s.Password.Text) { $s.Hint.Text='Enter your password.'; return }
-            $secure=ConvertTo-SecureString $s.Password.Text -AsPlainText -Force
+            # Do not pass plaintext through a cmdlet parameter (module event 4103).
+            $secure=[Net.NetworkCredential]::new('', $s.Password.Text).SecurePassword
+            $secure.MakeReadOnly()
             $s.Password.Clear()
             $s.Credential=New-Object Management.Automation.PSCredential($login,$secure)
             $s.User.Enabled=$false; $s.Password.Enabled=$false; $s.Authenticate.Enabled=$false
@@ -331,6 +354,10 @@ function New-SfsuAuthenticationDialog {
         }
     })
     $state.Timer.Add_Tick({
+        if ($null -eq $state.Worker) {
+            if (-not $state.Closing -and [DateTime]::UtcNow -ge $state.RetryAfterUtc) { $state.Authenticate.Enabled=$true; $state.Timer.Stop() }
+            return
+        }
         if ($null -eq $state.Pending -or -not $state.Pending.IsCompleted) { return }
         $state.Timer.Stop()
         try {
@@ -344,6 +371,10 @@ function New-SfsuAuthenticationDialog {
             $state.Worker.Dispose(); $state.Worker=$null; $state.Pending=$null
             $state.User.Enabled=$true; $state.Password.Enabled=$true; $state.Authenticate.Enabled=$true
             if (-not $state.Succeeded -and $null -ne $state.Credential) { $state.Credential.Password.Dispose(); $state.Credential=$null }
+            if (-not $state.Succeeded -and -not $state.Closing) {
+                $state.Failures++; $state.RetryAfterUtc=[DateTime]::UtcNow.AddSeconds([Math]::Min(30,2*[Math]::Pow(2,[Math]::Min(4,$state.Failures-1))))
+                $state.Authenticate.Enabled=$false; $state.Timer.Start()
+            }
         }
         if ($state.Succeeded) { $state.Form.DialogResult='OK'; $state.Form.Close() }
         elseif ($state.Closing) { $state.Form.DialogResult='Cancel'; $state.Form.Close() }
@@ -362,7 +393,7 @@ function New-SfsuAuthenticationDialog {
         $s.Heading.Font.Dispose()
         if ($null -ne $s.Credential) { $s.Credential.Password.Dispose(); $s.Credential=$null }
     })
-    $user.AccessibleName='SFSU ID or power-user ID'; $user.AccessibleDescription='Enter the account ID, optionally followed by @sfsu.edu.'
+    $user.AccessibleName='Standard SFSU ID'; $user.AccessibleDescription='Enter your standard numeric account ID, optionally followed by @sfsu.edu. Power-user accounts cannot connect to AD; their profiles remain available for migration.'
     $password.AccessibleName='Password'; $password.AccessibleDescription='Active Directory password. The entry is masked.'
     $ok.Name='PrimaryAction'
     Initialize-SfsuAccessibleStatus $validation 'Alert'
@@ -390,6 +421,7 @@ function Show-SfsuDirectoryCredentials {
         if ($dialog.Tag.ReportPath) { $script:SfsuUi.LatestReport=$dialog.Tag.ReportPath; $script:SfsuUi.Open.Enabled=$true }
         if ($accepted) {
             $script:SfsuUi.Credential=$dialog.Tag.Credential; $dialog.Tag.Credential=$null
+            $script:SfsuUi.DirectoryLastUsedUtc=[DateTime]::UtcNow
         }
     } finally { $dialog.Dispose() }
     if ($script:SfsuUi.Tabs.SelectedIndex -eq 0 -or -not $script:SfsuUi.UseDirectory) { Start-SfsuUiTask 'Discover profiles' }
@@ -649,6 +681,7 @@ $form.Add_SystemColorsChanged({ Update-SfsuAppearance })
 $appearanceTimer=New-Object Windows.Forms.Timer; $appearanceTimer.Interval=1000
 $script:SfsuUi.AppearanceTimer=$appearanceTimer
 $appearanceTimer.Add_Tick({
+    [void](Test-SfsuCredentialExpiry)
     $signature=([string][Windows.Forms.SystemInformation]::HighContrast)+':'+[Drawing.SystemColors]::Window.ToArgb()+':'+[Drawing.SystemColors]::WindowText.ToArgb()+':'+[Drawing.SystemColors]::Control.ToArgb()+':'+[Drawing.SystemColors]::ControlText.ToArgb()+':'+[Drawing.SystemColors]::Highlight.ToArgb()+':'+[Drawing.SystemColors]::HighlightText.ToArgb()
     if ($signature -cne $script:SfsuUi.AppearanceSignature) { $script:SfsuUi.AppearanceSignature=$signature; Update-SfsuAppearance }
 })
@@ -717,6 +750,7 @@ $timer.Add_Tick({
             }
         }
     } finally {
+        if ($script:SfsuUi.UseDirectory -and $script:SfsuUi.Action -in @('Discover profiles','Refresh current names')) { $script:SfsuUi.DirectoryLastUsedUtc=[DateTime]::UtcNow }
         $script:SfsuUi.Worker.Dispose(); $script:SfsuUi.Worker=$null; $script:SfsuUi.Pending=$null
         $script:SfsuUi.Tabs.Enabled=$true; $script:SfsuUi.Cancel.Enabled=$false
         if ($script:SfsuUi.CloseWhenDone) { $script:SfsuUi.Form.Close() }

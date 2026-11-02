@@ -31,6 +31,7 @@ foreach ($name in @('Sfsu.Logging.psm1','Sfsu.Inventory.psm1')) { Copy-Item -Lit
 Import-Module (Join-Path $testRoot 'App/Scripts/Sfsu.Logging.psm1') -Force
 Import-Module (Join-Path $testRoot 'App/Scripts/Sfsu.Inventory.psm1') -Force
 $module=Get-Module Sfsu.Inventory
+$credentialFixture=[Management.Automation.PSCredential]::new('000000123@sfsu.edu',[Net.NetworkCredential]::new('','SYNTHETIC-password-must-not-be-logged-578').SecurePassword)
 $sourcePath=Join-Path $testRoot '000000123'
 [void][IO.Directory]::CreateDirectory($sourcePath)
 $sentinel=Join-Path $sourcePath 'untouched.txt'; [IO.File]::WriteAllText($sentinel,'SYNTHETIC source data must never be copied or modified.')
@@ -116,7 +117,7 @@ try {
         if ($script:Records.ContainsKey($Sid)) { $script:Records[$Sid] }
     }
 } $domainSid
-$discovery=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot
+$discovery=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot -Credential $credentialFixture
 $verified=$discovery.Profiles[0]
 Assert-True ($verified.IdentitySource -eq 'LDAP') 'Exact SID lookup resolves identity.'
 Assert-True ($verified.SfsuId -ceq '000000123') 'Leading zeros in the SFSU ID are preserved.'
@@ -127,11 +128,11 @@ $journal=[IO.File]::ReadAllText((Join-Path $discovery.RunDirectory 'events.jsonl
 Assert-True (-not ($journal -match 'simulated') -and (ConvertFrom-Json ($journal -split "`n")[0]).Data.Sample -eq $false) 'Discovery journal records actual actions without simulated events.'
 Assert-True ($journal -match 'ProfileDiscovery') 'Discovery has its own operation label.'
 $attempts=@([IO.File]::ReadAllLines((Join-Path $discovery.RunDirectory 'events.jsonl')) | ForEach-Object { ConvertFrom-Json $_ } | Where-Object Message -Like 'Attempting LDAP connection*')
-Assert-True ($attempts.Count -eq 1 -and $attempts[0].Details.Contains('Default Windows credentials')) 'Default discovery records one LDAP attempt and its credential source.'
-Assert-True ($attempts[0].Details.Contains('SYNTHETIC-LAPTOP\LocalAdmin') -and $attempts[0].Details.Contains('not independently verified')) 'Default credentials record execution identity without claiming the outbound account is verified.'
+Assert-True ($attempts.Count -eq 1 -and $attempts[0].Details.Contains('Explicit directory credentials')) 'Explicit discovery records one LDAP attempt and its credential source.'
+Assert-True ($attempts[0].Details.Contains('SYNTHETIC-LAPTOP\LocalAdmin') -and $attempts[0].Details.Contains('not a directory-confirmed identity')) 'Explicit credentials record execution identity without claiming the outbound account is verified.'
 Assert-True ([IO.File]::ReadAllText($discovery.ReportPath).Contains('SYNTHETIC-LAPTOP\LocalAdmin')) 'The HTML report includes the attempted authentication context.'
 & $module { param($sid) $script:Records[$sid][0].SamAccountName='000000999' } $domainSid
-$folderConflict=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot
+$folderConflict=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot -Credential $credentialFixture
 Assert-True ($folderConflict.Profiles[0].SfsuId -ceq '000000123' -and $folderConflict.Profiles[0].IdentityStatus -match 'ID conflict') 'LDAP cannot silently overwrite an inferred folder ID with a different account ID.'
 Assert-Throws { Set-SfsuManualIdentity -Profile $folderConflict.Profiles[0] -DisplayName 'Wrong Account' -Confirmed } 'Assign Display Name cannot bypass a folder/directory ID conflict.'
 & $module { param($sid) $script:Records[$sid][0].SamAccountName='000000123' } $domainSid
@@ -140,11 +141,11 @@ Assert-True ($filter -match '^(\\[0-9a-f]{2})+$') 'SID filter uses binary hex es
 
 # Record an explicitly supplied account before a failed bind, without secrets.
 $secretFixture='SYNTHETIC-password-must-not-be-logged-578'
-$credentialFixture=New-Object Management.Automation.PSCredential('EXAMPLE\PowerTech',(ConvertTo-SecureString $secretFixture -AsPlainText -Force))
+$credentialFixture=New-Object Management.Automation.PSCredential('000000123@sfsu.edu',(ConvertTo-SecureString $secretFixture -AsPlainText -Force))
 Assert-True ((ConvertTo-SfsuLogin ' 000000123 ') -ceq '000000123@sfsu.edu') 'Bare IDs normalize to SFSU Login while preserving leading zeros.'
 Assert-True ((ConvertTo-SfsuLogin '000000123@SFSU.EDU') -ceq '000000123@SFSU.EDU') 'A complete login is accepted without appending or rewriting its suffix.'
-Assert-True ((ConvertTo-SfsuLogin ' p000000123 ') -ceq 'p000000123@sfsu.edu') 'Power-user login preserves the p prefix and leading zeros.'
-Assert-True ((ConvertTo-SfsuLogin 'p000000123@sfsu.edu') -ceq 'p000000123@sfsu.edu') 'A full power-user login receives no second suffix.'
+Assert-Throws { ConvertTo-SfsuLogin ' p000000123 ' } 'Power-user AD sign-in is rejected.'
+Assert-Throws { ConvertTo-SfsuLogin 'p000000123@sfsu.edu' } 'Full power-user AD sign-in is rejected.'
 foreach ($invalidLogin in @('','person@sfsu.edu','000000123@example.invalid','EXAMPLE\tech','12 34','123@sfsu.edu@sfsu.edu','p','pp000000123','p000000123@example.invalid','p000000123@sfsu.edu@sfsu.edu','p12 34','x000000123')) {
     Assert-Throws { ConvertTo-SfsuLogin $invalidLogin } ('Invalid/email login is rejected: ' + $invalidLogin)
 }
@@ -156,7 +157,7 @@ Assert-True ((& $module { $script:CimCalls }) -eq $beforeAuthCim) 'Authenticatio
 $failedAuthentication=Invoke-SfsuDirectoryAuthentication -PackageRoot $testRoot -Credential $credentialFixture
 Assert-True (-not $failedAuthentication.Success -and $failedAuthentication.DirectoryStatus -eq 'Authentication failed') 'Failed authentication returns a retryable result instead of accepting credentials.'
 Assert-True ([IO.File]::ReadAllText($failedAuthentication.ReportPath).Contains('id="outcome">Failed</h2>')) 'Authentication failure is finalized as Failed.'
-$withoutAd=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot -SkipDirectoryLookup
+$withoutAd=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot -Credential $credentialFixture -SkipDirectoryLookup
 $manualJournal=[IO.File]::ReadAllText((Join-Path $withoutAd.RunDirectory 'events.jsonl'))
 Assert-True ($withoutAd.Profiles.Count -eq 2 -and $withoutAd.Profiles[0].IdentitySource -eq 'Unresolved' -and $withoutAd.DirectoryStatus -match 'skipped') 'Manual mode enumerates both account types without claiming AD identity.'
 Assert-True (-not $manualJournal.Contains('Attempting LDAP connection')) 'Manual mode never falls back to default LDAP credentials.'
@@ -165,19 +166,19 @@ $authEvents=@([IO.File]::ReadAllLines((Join-Path $authFailure.RunDirectory 'even
 $authAttempt=@($authEvents | Where-Object Message -Like 'Attempting LDAP connection*')[0]
 $authWarning=@($authEvents | Where-Object Message -EQ 'Authentication failed')[0]
 Assert-True ($authAttempt.Sequence -lt $authWarning.Sequence) 'Attempt context is persisted before a failed LDAP bind.'
-Assert-True ($authAttempt.Details.Contains('Attempted LDAP account: EXAMPLE\PowerTech') -and $authAttempt.Details.Contains('Explicit directory credentials')) 'Explicit LDAP account and source are recorded accurately.'
+Assert-True ($authAttempt.Details.Contains('Attempted LDAP account: 000000123@sfsu.edu') -and $authAttempt.Details.Contains('Explicit directory credentials')) 'Explicit LDAP account and source are recorded accurately.'
 Assert-True ((& $module { $script:LastDirectoryAccount }) -eq $credentialFixture.UserName) 'The recorded explicit account is the credential passed to the connection.'
 Assert-True ($authFailure.DirectoryStatus -eq 'Authentication failed') 'Authentication failure retains its original status with account diagnostics.'
 $authJournal=[IO.File]::ReadAllText((Join-Path $authFailure.RunDirectory 'events.jsonl'))
 $authHtml=[IO.File]::ReadAllText($authFailure.ReportPath)
 Assert-True (-not $authJournal.Contains($secretFixture) -and -not $authHtml.Contains($secretFixture) -and -not $authJournal.Contains('System.Security.SecureString')) 'Journals/reports contain account names without passwords or credential objects.'
 & $module { $script:DirectoryFailure=$false; $script:WindowsIdentityFailure=$true }
-$missingContext=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot
+$missingContext=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot -Credential $credentialFixture
 Assert-True ($missingContext.DirectoryStatus -eq 'Connected' -and [IO.File]::ReadAllText($missingContext.ReportPath).Contains('Windows execution identity: Unavailable')) 'Unavailable execution-identity diagnostics do not prevent LDAP lookup.'
 & $module { $script:WindowsIdentityFailure=$false; $script:DirectoryFailureCode=81 }
 
 & $module { $script:DirectoryFailure=$true }
-$offline=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot
+$offline=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot -Credential $credentialFixture
 Assert-True ($offline.Profiles[0].IdentitySource -eq 'Unresolved') 'Unreachable LDAP does not invent identity.'
 Assert-True ($offline.DirectoryStatus -eq 'Directory unreachable or timed out') 'Directory unavailability is reported accurately.'
 $unresolved=Invoke-SfsuBackupPreparation -PackageRoot $testRoot -Profiles @($offline.Profiles[0])
@@ -189,7 +190,7 @@ $manual=Set-SfsuManualIdentity -Profile $offline.Profiles[0] -SfsuId '000000123'
 Assert-True ($manual.IdentitySource -eq 'Manual' -and $manual.ManualConfirmed -and -not $manual.DirectorySid) 'Manual identity is labeled and detached from directory verification.'
 
 & $module { param($sid) $script:DirectoryFailure=$false; $script:Records[$sid]=@($script:Records[$sid][0],$script:Records[$sid][0]) } $domainSid
-$conflict=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot
+$conflict=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot -Credential $credentialFixture
 Assert-True ($conflict.Profiles[0].IdentityStatus -match 'Conflicting') 'Multiple directory matches are not selected automatically.'
 Assert-Throws { Set-SfsuManualIdentity -Profile $conflict.Profiles[0] -SfsuId '000000123' -DisplayName 'Manual Person' -Confirmed } 'Manual entry cannot bypass directory conflicts.'
 & $module { param($sid) $script:Records[$sid]=@($script:Records[$sid][0]) } $domainSid
@@ -230,20 +231,20 @@ Assert-True ([IO.File]::ReadAllText($outside.ReportPath).Contains('id="outcome">
 
 # Same stable directory identity: show a live current name without rewriting historical metadata.
 & $module { param($sid) $script:Records[$sid][0].DisplayName='Synthetic New Name' } $domainSid
-$renamed=Invoke-SfsuBackupInventory -PackageRoot $testRoot -LookupNames
+$renamed=Invoke-SfsuBackupInventory -PackageRoot $testRoot -LookupNames -Credential $credentialFixture
 $refreshJournal=[IO.File]::ReadAllText((Join-Path $renamed.RunDirectory 'events.jsonl'))
-Assert-True ($refreshJournal.Contains('Default Windows credentials') -and $refreshJournal.Contains('SYNTHETIC-LAPTOP')) 'Current-name refresh also records default authentication context.'
+Assert-True ($refreshJournal.Contains('Explicit directory credentials') -and $refreshJournal.Contains('SYNTHETIC-LAPTOP')) 'Current-name refresh records explicit authentication context.'
 $changed=@($renamed.Backups | Where-Object IdentitySource -eq 'LDAP')[0]
 Assert-True ($changed.DisplayName -eq 'Synthetic New Name' -and $changed.FormerName -eq 'Synthetic Person') 'Verified rename produces a formerly-known-as label.'
 Assert-True ((Get-FileHash -LiteralPath (Join-Path $path 'backup.json')).Hash -eq $manifestHash) 'Name refresh preserves saved identity metadata.'
 Assert-True (@($renamed.Backups | Where-Object { $_.IdentitySource -eq 'Manual' -and $_.FormerName }).Count -eq 0) 'Manual names are not presented as verified name changes.'
-$upnCredential=New-Object Management.Automation.PSCredential('powertech@example.invalid',$credentialFixture.Password)
+$upnCredential=New-Object Management.Automation.PSCredential('000000456@sfsu.edu',$credentialFixture.Password)
 $explicitRefresh=Invoke-SfsuBackupInventory -PackageRoot $testRoot -LookupNames -Credential $upnCredential
 $explicitJournal=[IO.File]::ReadAllText((Join-Path $explicitRefresh.RunDirectory 'events.jsonl'))
-Assert-True ($explicitRefresh.DirectoryStatus -eq 'Connected' -and $explicitJournal.Contains('Attempted LDAP account: powertech@example.invalid')) 'Name refresh records explicit UPN credentials and preserves their format.'
+Assert-True ($explicitRefresh.DirectoryStatus -eq 'Connected' -and $explicitJournal.Contains('Attempted LDAP account: 000000456@sfsu.edu')) 'Name refresh records explicit UPN credentials and preserves their format.'
 Assert-True (-not $explicitJournal.Contains($secretFixture) -and -not [IO.File]::ReadAllText($explicitRefresh.ReportPath).Contains($secretFixture)) 'Name-refresh diagnostics omit the password.'
 & $module { param($sid) $script:Records[$sid][0].SamAccountName='000000999' } $domainSid
-$idChanged=Invoke-SfsuBackupInventory -PackageRoot $testRoot -LookupNames
+$idChanged=Invoke-SfsuBackupInventory -PackageRoot $testRoot -LookupNames -Credential $credentialFixture
 Assert-True (@($idChanged.Backups | Where-Object FormerName).Count -eq 0) 'An account ID conflict does not produce a name-change claim.'
 $broken=Join-Path $testRoot 'Backups/broken-metadata'; [void][IO.Directory]::CreateDirectory($broken); [IO.File]::WriteAllText((Join-Path $broken 'backup.json'),'{truncated')
 $invalid=@(Get-SfsuBackupCatalog $testRoot | Where-Object Path -eq $broken)[0]
@@ -301,7 +302,7 @@ try {
         $script:Fixtures=@($item)
         $script:Records[$sid]=@([pscustomobject]@{Sid=$sid;SamAccountName='p000000123';DisplayName='Synthetic Power User';UserPrincipalName='p000000123@sfsu.edu'})
     } $powerFixture $powerSid
-    $powerDiscovery=Invoke-SfsuProfileDiscovery -PackageRoot $powerRoot
+    $powerDiscovery=Invoke-SfsuProfileDiscovery -PackageRoot $powerRoot -Credential $credentialFixture
     $powerVerified=$powerDiscovery.Profiles[0]
     Assert-True ($powerVerified.SfsuId -ceq 'p000000123' -and $powerVerified.SfsuIdSource -eq 'ProfileDirectory') 'Power-user profile discovery retains the full prefixed folder ID.'
     Assert-True ($powerVerified.IdentitySource -eq 'LDAP' -and $powerVerified.DirectorySid -eq $powerSid -and $powerVerified.DisplayName -eq 'Synthetic Power User') 'Exact-SID LDAP verification accepts a matching power-user account and name.'
@@ -316,7 +317,7 @@ try {
                 'name' { $record.DisplayName=' ' }
             }
         } $powerSid $mismatch $domainSid
-        $powerRejected=(Invoke-SfsuProfileDiscovery -PackageRoot $powerRoot).Profiles[0]
+        $powerRejected=(Invoke-SfsuProfileDiscovery -PackageRoot $powerRoot -Credential $credentialFixture).Profiles[0]
         Assert-True ($powerRejected.IdentitySource -ne 'LDAP' -and -not $powerRejected.VerifiedAtUtc) ('Power-user verification refuses a mismatching '+$mismatch)
         if ($mismatch -ne 'name') {
             Assert-Throws { Set-SfsuManualIdentity -Profile $powerRejected -DisplayName 'Cannot Bypass' -Confirmed } ('Manual assignment cannot bypass a power-user '+$mismatch+' conflict.')
@@ -335,10 +336,10 @@ try {
     Assert-True ([IO.File]::ReadAllText($powerReview.ReportPath).Contains('no migration data exists to restore')) 'Power-user restore review retains the preparation-only warning.'
     $powerHash=(Get-FileHash $powerManifest).Hash
     & $module { param($sid) $script:Records[$sid][0].DisplayName='Renamed Power User' } $powerSid
-    $powerRenamed=Invoke-SfsuBackupInventory -PackageRoot $powerRoot -LookupNames
+    $powerRenamed=Invoke-SfsuBackupInventory -PackageRoot $powerRoot -LookupNames -Credential $credentialFixture
     Assert-True ($powerRenamed.Backups[0].FormerName -eq 'Synthetic Power User' -and $powerRenamed.Backups[0].DisplayName -eq 'Renamed Power User') 'Current-name refresh verifies a prefixed account ID.'
     & $module { param($sid) $script:Records[$sid][0].SamAccountName='000000123' } $powerSid
-    $powerWrongAccount=Invoke-SfsuBackupInventory -PackageRoot $powerRoot -LookupNames
+    $powerWrongAccount=Invoke-SfsuBackupInventory -PackageRoot $powerRoot -LookupNames -Credential $credentialFixture
     Assert-True (-not $powerWrongAccount.Backups[0].FormerName -and $powerWrongAccount.Backups[0].DisplayName -eq 'Synthetic Power User') 'The regular account cannot supply a power-user rename.'
     Assert-True ((Get-FileHash $powerManifest).Hash -eq $powerHash) 'Power-user refresh preserves historical metadata.'
     $powerForged=$powerVerified.PSObject.Copy(); $powerForged.SamAccountName='000000123'
