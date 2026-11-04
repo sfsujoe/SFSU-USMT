@@ -18,6 +18,7 @@ Printer migration is deferred as a future optional add-on. University printers a
 - [Current workflow review](docs/CURRENT-WORKFLOW-REVIEW.md): findings from the supplied scripts, binaries, and migration XML.
 - [Reporting guide](docs/REPORTING.md): report features, durable events/recovery, backup log snapshots, development API, and validation commands.
 - [Application testing guide](docs/APP-TESTING.md): discovery, directory credentials, manual identities, folder naming, metadata, and preparation/restore-review limits.
+- [LDAPS diagnostic](docs/LDAPS-DIAGNOSTIC.md): standalone TLS/Kerberos/SID test, optional 389 comparison, and required server-side channel-binding evidence.
 - [Project instructions](AGENTS.md): conventions for maintaining this project with Codex.
 
 ## Chat workflow

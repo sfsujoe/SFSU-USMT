@@ -8,6 +8,7 @@
 /Backups/
 /Logs/
 /tests/.work/
+/tools/LdapsDiagnostics/
 
 # Shared runtime appearance preference (ships with Classic when absent).
 /App/Settings/
