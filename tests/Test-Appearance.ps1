@@ -105,7 +105,7 @@ try {
     Assert-True ($profiles.StandardTab -and $backups.StandardTab -and $profiles.AccessibleName -and $backups.AccessibleName) 'Tables have accessible names and Tab exits the grid.'
     $status.Text='Synthetic task completed.'
     Assert-True ($status.AccessibleName -eq $status.Text -and $status.AccessibleRole -eq 'StatusBar' -and $status.LiveSetting -eq 'Polite') 'Status changes expose current text and polite live-region semantics.'
-    $profile=[pscustomobject]@{AccountType='Domain';SfsuId='p000000123';DisplayName='Synthetic Power User';ProfilePath='C:\Users\p000000123';ProfileSid='S-1-5-21-1-2-3-1001';DirectorySid='S-1-5-21-1-2-3-1001';SamAccountName='p000000123';IdentitySource='LDAP';IdentityStatus='Directory verified';VerifiedAtUtc='2026-11-01T12:00:00Z'}
+    $profile=[pscustomobject]@{AccountType='Domain';AccountName='p000000123';SfsuId='p000000123';SfsuIdSource='LDAP';SfsuIdAttribute='sAMAccountName';ManualConfirmed=$false;DisplayName='Synthetic Power User';ProfilePath='C:\Users\p000000123';ProfileSid='S-1-5-21-1-2-3-1001';DirectorySid='S-1-5-21-1-2-3-1001';SamAccountName='p000000123';IdentitySource='LDAP';IdentityStatus='Directory verified';VerifiedAtUtc='2026-11-01T12:00:00Z'}
     $manual=$profile.PSObject.Copy(); $manual.IdentitySource='Manual'; $manual.IdentityStatus='Manually entered (confirmed)'
     Set-SfsuProfileRows @($profile,$manual)
     Assert-True ($profiles.Rows[0].Cells['Verified'].Value -match 'AD verified') 'Verification has readable text alongside the symbol.'

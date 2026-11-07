@@ -8,7 +8,7 @@ $repository=Split-Path $PSScriptRoot -Parent
 $testRoot=Join-Path $PSScriptRoot ('.work/profile-access-'+[guid]::NewGuid().ToString('N').Substring(0,8))
 [void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'App/Scripts'))
 [void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'App/Reporting'))
-foreach ($name in @('Sfsu.Logging.psm1','Sfsu.Inventory.psm1')) { Copy-Item -LiteralPath (Join-Path $repository ('App/Scripts/'+$name)) -Destination (Join-Path $testRoot 'App/Scripts') }
+foreach ($name in @('Sfsu.Logging.psm1','Sfsu.Inventory.psm1','Sfsu.Identity.psd1','Sfsu.Identity.psm1')) { Copy-Item -LiteralPath (Join-Path $repository ('App/Scripts/'+$name)) -Destination (Join-Path $testRoot 'App/Scripts') }
 Copy-Item -LiteralPath (Join-Path $repository 'App/Reporting/report.template.html') -Destination (Join-Path $testRoot 'App/Reporting/report.template.html')
 Import-Module (Join-Path $testRoot 'App/Scripts/Sfsu.Logging.psm1') -Force
 Import-Module (Join-Path $testRoot 'App/Scripts/Sfsu.Inventory.psm1') -Force
@@ -53,12 +53,12 @@ try {
     $local=@($profiles | Where-Object AccountType -eq 'Local')[0]
     $power=@($profiles | Where-Object AccountType -eq 'Domain')[0]
     Assert-True ($local.ProfileSid -eq $localSid -and $local.AccountName -eq 'local-restricted' -and -not $local.SfsuId) 'Restricted local profiles retain local SAM identity.'
-    Assert-True ($power.ProfileSid -eq $powerSid -and $power.SfsuId -ceq 'p000000123') 'Restricted p-profiles retain the prefixed account ID.'
+    Assert-True ($power.ProfileSid -eq $powerSid -and -not $power.SfsuId) 'Restricted domain profiles retain their SID without guessing IDs.'
     Assert-True ($local.PathAccessStatus -eq 'Ready' -and $power.PathAccessStatus -eq 'Ready') 'Metadata checks succeed without requiring file-list access.'
     $discovery=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot -SkipDirectoryLookup
     Assert-True ($discovery.Profiles.Count -eq 2 -and $discovery.DirectoryStatus -match 'skipped') 'Manual discovery lists both profiles without an AD connection.'
     Set-SfsuManualIdentity -Profile $local -DisplayName 'Synthetic Local' -Confirmed | Out-Null
-    Set-SfsuManualIdentity -Profile $power -DisplayName 'Synthetic Power' -Confirmed | Out-Null
+    Set-SfsuManualIdentity -Profile $power -SfsuId 'p000000123' -DisplayName 'Synthetic Power' -Confirmed | Out-Null
     $prepared=Invoke-SfsuBackupPreparation -PackageRoot $testRoot -Profiles @($local,$power)
     Assert-True ($prepared.Paths.Count -eq 2 -and $prepared.Errors.Count -eq 0) 'Metadata-only preparation does not require listing the source files.'
     # Simulate a stronger metadata-access denial without changing more ACLs.
@@ -78,7 +78,7 @@ try {
     Assert-True ($journal.Contains('Source directory metadata access could not be verified; profile remains listed.') -and -not $journal.Contains('Excluded profiles: Linked')) 'Access denial is logged accurately, rather than mislabeled as a link.'
     $refused=Invoke-SfsuBackupPreparation -PackageRoot $testRoot -Profiles @($retained)
     Assert-True ($refused.Paths.Count -eq 0 -and $refused.Errors.Count -eq 1) 'Preparation requires verified source metadata when access is unknown.'
-    Assert-Throws { ConvertTo-SfsuLogin 'p000000123' } 'The discovery fix retains standard-only AD sign-in policy.'
+    Assert-True ((ConvertTo-SfsuLogin 'p000000123') -eq 'p000000123@sfsu.edu') 'Prefixed logins are supported.'
 } finally {
     foreach ($path in $saved.Keys) {
         $restored=[Security.AccessControl.DirectorySecurity]::new(); $restored.SetSecurityDescriptorSddlForm($saved[$path])

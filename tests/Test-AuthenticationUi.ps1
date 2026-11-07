@@ -9,6 +9,8 @@ $testRoot=Join-Path $PSScriptRoot ('.work/auth-ui-'+[guid]::NewGuid().ToString('
 [void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'App/Reporting'))
 Copy-Item (Join-Path $repository 'App/Reporting/report.template.html') (Join-Path $testRoot 'App/Reporting/report.template.html')
 Copy-Item (Join-Path $repository 'App/Scripts/Sfsu.Logging.psm1') (Join-Path $testRoot 'App/Scripts/Sfsu.Logging.psm1')
+Copy-Item (Join-Path $repository 'App/Scripts/Sfsu.Identity.psd1') (Join-Path $testRoot 'App/Scripts/Sfsu.Identity.psd1')
+Copy-Item (Join-Path $repository 'App/Scripts/Sfsu.Identity.psm1') (Join-Path $testRoot 'App/Scripts/Sfsu.Identity.psm1')
 $fixture=[IO.File]::ReadAllText((Join-Path $repository 'App/Scripts/Sfsu.Inventory.psm1'))+@'
 
 # Test-only connection fixture. The shipped module never contains this override.
@@ -44,7 +46,7 @@ try {
                 if ($c.Stage -eq 0) {
                     $c.Stage=1
                     Assert-True ($s.Form.Text -eq 'Authenticate to Active Directory') 'Dialog title is exact.'
-                    Assert-True (@($s.Form.Controls | Where-Object Text -eq 'Enter your SFSU ID and password').Count -eq 1) 'Dialog message is exact.'
+                    Assert-True (@($s.Form.Controls | Where-Object Text -eq 'Enter your SFSU account login and password').Count -eq 1) 'Dialog message distinguishes account login from university ID.'
                     Assert-True ($s.Heading.Font.Bold -and $s.Heading.Font.SizeInPoints -gt $s.Form.Font.SizeInPoints) 'The sign-in instruction is larger and bold.'
                     Assert-True (@($s.Form.Controls | Where-Object { $_.Text -match '\(optional @sfsu.edu\)' }).Count -eq 0) 'The optional-login suffix is removed from the visible label.'
                     Assert-True ($s.Purpose.Text -eq 'AD resolves SFSU ID to Display Name.' -and $s.Purpose.Text -notmatch 'password') 'The short footer explains identity resolution without password copy.'
@@ -53,8 +55,8 @@ try {
                     Assert-True ($s.Authenticate.Left -gt $s.Continue.Right -and $s.Authenticate.Top -eq $s.Continue.Top -and $s.Form.ClientSize.Width-$s.Authenticate.Right -eq $expectedMargin) ('Authenticate is bottom right, with Continue without AD immediately to its left. Client: '+$s.Form.ClientSize+'; buttons: '+$s.Continue.Bounds+' / '+$s.Authenticate.Bounds+'; expected margin: '+$expectedMargin)
                     Assert-True ($s.Form.AcceptButton -eq $s.Authenticate -and $s.Password.UseSystemPasswordChar) 'Enter authenticates and password entry is masked.'
                     if ($c.Kind -eq 'validation') {
-                        $s.User.Text='person@sfsu.edu'
-                        Assert-True ($s.Hint.Text -eq 'Enter your SFSU ID, not your email address.') 'An email address immediately shows the SFSU ID hint.'
+                        $s.User.Text='person@other.invalid'
+                        Assert-True ($s.Hint.Text -match 'login suffix') 'An unconfigured suffix immediately shows a validation hint.'
                         $s.Password.Text='synthetic'
                         $s.Authenticate.PerformClick()
                         Assert-True ($null -eq $s.Worker -and $s.Form.DialogResult -eq 'None') 'Invalid login does not start a connection or close the dialog.'
@@ -71,10 +73,6 @@ try {
                         elseif ($c.Kind -eq 'cancel') { $s.Password.Text='wait' }
                         else { $s.Password.Text='synthetic-good-password' }
                         $s.Authenticate.PerformClick()
-                        if ($c.Kind -eq 'power-full') {
-                            Assert-True ($null -eq $s.Worker -and $s.Hint.Text -match 'Power-user accounts cannot connect') 'Power-user sign-in is blocked before LDAP starts.'
-                            $s.Continue.PerformClick(); return
-                        }
                         Assert-True ($null -ne $s.Worker -and -not $s.Authenticate.Enabled -and -not $s.Password.Text) 'Authentication runs in the background with double submission disabled and the password box cleared.'
                     }
                 } elseif ($c.Kind -eq 'retry' -and $c.Stage -eq 1 -and $null -eq $s.Worker -and $s.Authenticate.Enabled) {
@@ -109,7 +107,7 @@ try {
                 Assert-True (Test-Path -LiteralPath $dialog.Tag.ReportPath) 'The verified authentication has its own real report.'
                 Assert-True (-not [IO.File]::ReadAllText($dialog.Tag.ReportPath).Contains('synthetic-good-password')) 'Authentication reports do not contain the submitted password.'
             } elseif ($case -eq 'power-full') {
-                Assert-True ($result -eq 'Cancel' -and -not $dialog.Tag.Succeeded -and $null -eq $dialog.Tag.Credential) 'A rejected power-user login never becomes an authenticated session.'
+                Assert-True ($result -eq 'OK' -and $dialog.Tag.Succeeded -and $dialog.Tag.Credential.UserName -ceq 'p000000123@sfsu.edu') 'Prefixed credentials become a session only after successful synthetic authentication.'
             } elseif ($case -ne 'accept-flow') {
                 Assert-True ($result -eq 'Cancel' -and -not $dialog.Tag.Succeeded -and $null -eq $dialog.Tag.Credential) 'Continue without AD never returns an authenticated credential, including during an active attempt.'
             }

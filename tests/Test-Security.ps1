@@ -20,12 +20,13 @@ $script:Assertions=0
 function Assert-True([bool]$Value,[string]$Message) { if (-not $Value) { throw ('FAILED: '+$Message) }; $script:Assertions++ }
 function Assert-Throws([scriptblock]$Action,[string]$Message) { $caught=$false; try { & $Action | Out-Null } catch { $caught=$true }; Assert-True $caught $Message }
 $standard=[Management.Automation.PSCredential]::new('000000123@sfsu.edu',[Net.NetworkCredential]::new('','SYNTHETIC-ONLY').SecurePassword)
-foreach ($name in @('p000000123','p000000123@sfsu.edu','P000000123@SFSU.EDU','EXAMPLE\p000000123')) {
-    Assert-Throws { ConvertTo-SfsuLogin $name } ('Power-user AD login rejected: '+$name)
+foreach ($name in @('p000000123','p000000123@sfsu.edu','P000000123@SFSU.EDU','AB00123')) {
+    Assert-True ((ConvertTo-SfsuLogin $name) -like '*@sfsu.edu') ('Generalized AD login accepted: '+$name)
     $powerCredential=[Management.Automation.PSCredential]::new($name,$standard.Password)
-    Assert-Throws { & $inventory { param($c) New-SfsuLdapConnection 'ad.sfsu.edu' $c } $powerCredential } 'Backend rejects power-user credentials before binding.'
+    $candidate=& $inventory { param($c) New-SfsuLdapConnection 'ad.sfsu.edu' $c } $powerCredential
+    try { Assert-True ($candidate.AuthType -eq 'Kerberos') 'Generalized credentials retain Kerberos without binding.' } finally { $candidate.Dispose() }
 }
-Assert-Throws { & $inventory { New-SfsuLdapConnection 'ad.sfsu.edu' $null } } 'Implicit Windows credentials cannot bypass standard-account policy.'
+Assert-Throws { & $inventory { New-SfsuLdapConnection 'ad.sfsu.edu' $null } } 'Explicit credential policy is retained.'
 $connection=& $inventory { param($c) New-SfsuLdapConnection 'ad.sfsu.edu' $c } $standard
 try {
     Assert-True ($connection.AuthType -eq 'Kerberos' -and $connection.SessionOptions.Signing -and $connection.SessionOptions.Sealing) 'Real connection configuration requires Kerberos, signing and sealing without contacting AD.'
@@ -65,15 +66,11 @@ Assert-True ($discovery.Profiles.Count -eq 1 -and $profile.SfsuId -ceq 'p0000001
 Assert-True ([IO.File]::ReadAllText((Join-Path $discovery.RunDirectory 'events.jsonl')).Contains('Unsupported account SID (including Entra profiles); count=1')) 'Unsupported exclusions are counted without logging their personal identifiers.'
 $blockedPower=[Management.Automation.PSCredential]::new('p000000123@sfsu.edu',$standard.Password)
 $blockedResult=Invoke-SfsuDirectoryAuthentication -PackageRoot $testRoot -Credential $blockedPower
-Assert-True (-not $blockedResult.Success -and $blockedResult.DirectoryStatus -match 'Power-user accounts cannot connect') 'The public authentication entry point enforces account policy even with a synthetic session provider.'
-foreach ($suffix in @('000000123.SFSU','000000123.000','000000123.SFSU.001','p000000123.000')) {
-    Assert-True ((Get-SfsuProfileFolderId (Join-Path $testRoot $suffix)) -eq ($suffix.Split('.')[0])) 'Recognized Windows suffix preserves the full base ID.'
-}
-Assert-True (-not (Get-SfsuProfileFolderId 'C:\Users\000000123.arbitrary.extra')) 'Unrecognized suffix combinations are not guessed.'
+Assert-True ($blockedResult.Success) 'The public authentication entry point accepts prefixed credentials with the synthetic session provider.'
 $unknown=$profile.PSObject.Copy(); $unknown.ProfilePath=Join-Path $testRoot 'unknown-folder'; $unknown.SfsuId=''
 $before=& $inventory { $script:SecurityQueries }
 $resolved=& $inventory { param($p) Resolve-SfsuProfileIdentity $p $null } $unknown
-Assert-True ((& $inventory { $script:SecurityQueries }) -eq $before+1 -and $resolved.IdentitySource -ne 'LDAP') 'Even unknown folders are looked up by SID, without accepting an unverifiable directory name.'
+Assert-True ((& $inventory { $script:SecurityQueries }) -eq $before+1 -and $resolved.IdentitySource -eq 'LDAP') 'An arbitrary folder name does not block exact-SID verification.'
 $prepared=Invoke-SfsuBackupPreparation -PackageRoot $testRoot -Profiles @($profile)
 Assert-True ($prepared.Paths.Count -eq 1 -and $prepared.Errors.Count -eq 0) 'Suffixed power-user profile prepares metadata and a safe log snapshot.'
 $manifestPath=Join-Path $prepared.Paths[0] 'backup.json'

@@ -6,6 +6,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $repository=Split-Path $PSScriptRoot -Parent
 $sourcePath=Join-Path $repository 'tools/Test-SfsuLdaps.ps1'
+$script:DiagnosticScriptPath=$sourcePath
 $source=[IO.File]::ReadAllText($sourcePath)
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($sourcePath,[ref]$tokens,[ref]$errors)
@@ -27,7 +28,10 @@ foreach ($badName in @('127.0.0.1','::1','server','https://dc.example.invalid','
 }
 Assert-DiagnosticDnsName 'dc-01.ad.example.invalid'
 Assert-True ((ConvertTo-DiagnosticLogin '000000123') -ceq '000000123@sfsu.edu') 'Normalize standard login without dropping zeros.'
-foreach ($badLogin in @('p000000123','P000000123@sfsu.edu','EXAMPLE\000000123','name@sfsu.edu','000000123@other.invalid')) {
+foreach ($login in @('p000000123','P000000123@sfsu.edu','name@sfsu.edu')) {
+    Assert-True ((ConvertTo-DiagnosticLogin $login) -like '*@sfsu.edu') 'Diagnostic uses generalized shared login policy.'
+}
+foreach ($badLogin in @('EXAMPLE\000000123','000000123@other.invalid')) {
     Assert-Throws { ConvertTo-DiagnosticLogin $badLogin } 'Reject nonstandard technician credentials.'
 }
 # Exercise the real prompt helper with a synthetic host. No GUI, terminal input
@@ -49,8 +53,8 @@ Assert-True ($prompted.UserName -eq '000000123@sfsu.edu' -and $prompted.Password
 $prompted.Password.Dispose()
 $script:promptAccount=''; $script:passwordPrompts=0
 Assert-True ($null -eq (Read-DiagnosticCredential 'dc.example.invalid') -and $script:passwordPrompts -eq 0) 'Blank ID skips credentials before asking for password.'
-$script:promptAccount='p000000123'
-Assert-Throws { Read-DiagnosticCredential 'dc.example.invalid' } 'Prompt rejects power-user ID before password collection.'
+$script:promptAccount='bad account'
+Assert-Throws { Read-DiagnosticCredential 'dc.example.invalid' } 'Prompt rejects malformed login before password collection.'
 Assert-True ($script:passwordPrompts -eq 0) 'Rejected ID never opens a password prompt.'
 $script:promptAccount='000000123'; $script:emptyPassword=$true
 Assert-Throws { Read-DiagnosticCredential 'dc.example.invalid' } 'Empty secure password cannot create a credential.'
@@ -113,7 +117,7 @@ $script:fixtureSid='S-1-5-21-111111-222222-333333-1101'
 $script:fixturePassword='SYNTHETIC-LDAPS-ONLY'
 $credential=[Management.Automation.PSCredential]::new('000000123',[Net.NetworkCredential]::new('',$script:fixturePassword).SecurePassword)
 Assert-True (-not [Management.Automation.PSSerializer]::Serialize($credential).Contains($script:fixturePassword)) 'Credential serialization does not contain a plaintext password.'
-$script:fixtureId='000000123'; $script:bindFails=$false; $script:queryFilters=@(); $script:disposed=$false
+$script:fixtureId='000000123'; $script:fixtureUpn=''; $script:bindFails=$false; $script:queryFilters=@(); $script:disposed=$false
 function New-Object {
     param([Parameter(Position=0)][string]$TypeName,[Parameter(Position=1)][object[]]$ArgumentList)
     if ($TypeName -eq 'System.DirectoryServices.Protocols.LdapConnection') {
@@ -129,6 +133,7 @@ function New-Object {
             $sid=[Security.Principal.SecurityIdentifier]::new($script:fixtureSid)
             $bytes=[byte[]]::new($sid.BinaryLength); $sid.GetBinaryForm($bytes,0)
             $attributes=@{objectSid=,([byte[]]$bytes);sAMAccountName=@($script:fixtureId);displayName=@('Synthetic Private Name');userPrincipalName=@($script:fixtureId+'@sfsu.edu')}
+            if ($script:fixtureUpn) { $attributes.userPrincipalName=@($script:fixtureUpn) }
             return [pscustomobject]@{Entries=@([pscustomobject]@{Attributes=$attributes})}
         }
         $script:lastConnection=$fake
@@ -154,6 +159,15 @@ Assert-True ($lookup.Status -eq 'Passed' -and $lookup.QueryScope -eq 'SuppliedPr
 $script:fixtureId='000000123'
 $lookup=Invoke-DiagnosticDirectory $data
 Assert-True ($lookup.Status -eq 'Failed' -and -not $lookup.IdentityChecks.AccountIdMatches) 'Full prefixed account mismatch fails verification.'
+$generalCredential=[Management.Automation.PSCredential]::new('a*(b)@sfsu.edu',$credential.Password)
+$generalData=@{Server='dc.example.invalid';Timeout=2;Credential=$generalCredential;UseTls=$true;ProfileSid='';ExpectedAccountId=''}
+$script:fixtureId='different.sam'; $script:fixtureUpn='a*(b)@sfsu.edu'; $script:queryFilters=@()
+$generalLookup=Invoke-DiagnosticDirectory $generalData
+Assert-True ($generalLookup.Status -eq 'Passed' -and $generalLookup.IdentityChecks.CredentialUpnMatches -and $script:queryFilters[1].Contains('userPrincipalName=a\2a\28b\29@sfsu.edu')) 'Credential lookup uses escaped literal UPN and accepts an independent SAM account name.'
+$script:fixtureUpn='different.upn@sfsu.edu'
+$generalMismatch=Invoke-DiagnosticDirectory $generalData
+Assert-True ($generalMismatch.Status -eq 'Failed' -and -not $generalMismatch.IdentityChecks.CredentialUpnMatches) 'Credential SID round-trip refuses a mismatching returned UPN.'
+$script:fixtureId='000000123'; $script:fixtureUpn=''
 $script:bindFails=$true; $script:queryFilters=@()
 $lookup=Invoke-DiagnosticDirectory $data
 Assert-True ($lookup.Bind -eq 'Failed' -and $lookup.Failure.LdapCode -eq 49 -and $script:queryFilters.Count -eq 0) 'Credential rejection runs no directory query.'
@@ -198,7 +212,10 @@ function Invoke-DiagnosticWorker([string]$Mode,$Data,[int]$TimeoutSeconds) {
 function Read-DiagnosticCredential { param($SelectedServer) [Management.Automation.PSCredential]::new('000000123',[Net.NetworkCredential]::new('','SYNTHETIC-ONLY').SecurePassword) }
 '@
 $fixtureSource=$source.Replace("if (`$PSVersionTable.PSEdition -ne 'Desktop')",$injected+"`r`nif (`$PSVersionTable.PSEdition -ne 'Desktop')")
-$commandFixture=Join-Path $testRoot 'command.ps1'
+[void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'tools'))
+[void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'App/Scripts'))
+foreach ($name in @('Sfsu.Identity.psm1','Sfsu.Identity.psd1')) { Copy-Item -LiteralPath (Join-Path $repository ('App/Scripts/'+$name)) -Destination (Join-Path $testRoot 'App/Scripts') }
+$commandFixture=Join-Path $testRoot 'tools/command.ps1'
 [IO.File]::WriteAllText($commandFixture,$fixtureSource)
 $fixtureOutput=Join-Path $testRoot 'output'
 & (Join-Path $PSHOME 'powershell.exe') -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $commandFixture -Server dc.example.invalid -BindServer dc.example.invalid -Compare389 -OutputDirectory $fixtureOutput | Out-Null
@@ -216,13 +233,13 @@ try {
     & (Join-Path $PSHOME 'powershell.exe') -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $commandFixture -Server dc.example.invalid -TransportOnly | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Default-output launch fixture failed.' }
 } finally { Pop-Location }
-$defaultReports=@(Get-ChildItem -LiteralPath (Join-Path $testRoot 'LdapsDiagnostics') -Filter '*.json')
+$defaultReports=@(Get-ChildItem -LiteralPath (Join-Path $testRoot 'tools/LdapsDiagnostics') -Filter '*.json')
 Assert-True ($defaultReports.Count -eq 1 -and -not (Test-Path -LiteralPath (Join-Path $unrelatedDirectory 'LdapsDiagnostics'))) 'Omitted output directory resolves beside the saved script, independent of working directory.'
 $defaultResult=Get-Content -LiteralPath $defaultReports[0].FullName -Raw | ConvertFrom-Json
 Assert-True ($defaultResult.Overall -eq 'TransportOnly' -and $null -eq $defaultResult.Directory) 'Default-output launch completes without credentials using offline transport fixtures.'
-$invalid=[Management.Automation.PSCredential]::new('p000000123',$credential.Password)
+$invalid=[Management.Automation.PSCredential]::new('bad account',$credential.Password)
 $rejected=Invoke-DiagnosticWorker 'Directory' @{Credential=$invalid;Server='never-contacted.example.invalid';UseTls=$true;Timeout=2;ProfileSid='';ExpectedAccountId=''} 10 $sourcePath
-Assert-True ($rejected.Status -eq 'WorkerFailed' -and $rejected.Stage -eq 'Directory') 'Actual diagnostic worker rejects a p-account before any LDAP construction/bind.'
+Assert-True ($rejected.Status -eq 'WorkerFailed' -and $rejected.Stage -eq 'Directory') 'Actual diagnostic worker rejects malformed credentials before any LDAP construction/bind.'
 $rejectedJson=$rejected | ConvertTo-Json -Depth 8
 Assert-True (-not $rejectedJson.Contains('p000000123') -and -not $rejectedJson.Contains($script:fixturePassword)) 'Actual worker failure excludes credential identifiers and secret.'
 $credential.Password.Dispose()

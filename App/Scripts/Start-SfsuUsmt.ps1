@@ -18,6 +18,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $script:CurrentRun = $null
+$guiRequested = -not ($Headless -or $DiscoverProfiles -or $RebuildReport -or $BuildUiOnly -or $ReviewStorageAccess -or $PreviewLogRetention -or $ApplyLogRetention -or $SnapshotBackupPath)
+
+function Show-SfsuStartupError([string]$DetailsPath) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $message='SFSU USMT could not start.'
+    if ($DetailsPath) { $message+="`r`n`r`nStartup details: "+$DetailsPath }
+    else { $message+="`r`n`r`nStartup details could not be saved. Check access to the toolkit folder, or run the PowerShell entry script from a console to view the error." }
+    [void][Windows.Forms.MessageBox]::Show($message,'SFSU USMT startup error',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)
+}
 
 function New-SfsuSampleReport {
     param([string]$SelectedScenario)
@@ -112,6 +121,7 @@ try {
 } catch {
     # Startup may fail before the reporting module is available. Keep a plain-text fallback.
     $failureText = $_.Exception.ToString()
+    $failurePath = ''
     try {
         $logsPath = Join-Path $packageRoot 'Logs'
         if (Get-Command Assert-SfsuSafePath -ErrorAction SilentlyContinue) { [void](Assert-SfsuSafePath $logsPath -AllowMissing) }
@@ -119,7 +129,11 @@ try {
         $failurePath = Join-Path $logsPath ('startup-' + [guid]::NewGuid().ToString('N') + '.txt')
         [System.IO.File]::WriteAllText($failurePath, $failureText)
         [Console]::Error.WriteLine('Startup details: ' + $failurePath)
-    } catch { [Console]::Error.WriteLine('The Logs folder is not writable. Save the error shown below.') }
+    } catch { $failurePath=''; [Console]::Error.WriteLine('The Logs folder is not writable. Save the error shown below.') }
     [Console]::Error.WriteLine($failureText)
+    if ($guiRequested) {
+        try { Show-SfsuStartupError -DetailsPath $failurePath }
+        catch { [Console]::Error.WriteLine('Could not display the startup error dialog.') }
+    }
     exit 1
 }

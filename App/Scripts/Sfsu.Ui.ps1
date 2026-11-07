@@ -196,14 +196,6 @@ function New-SfsuGrid($Parent, [object[]]$Definitions) {
     $grid
 }
 
-function Test-SfsuProfileVerified($Profile) {
-    $Profile.AccountType -eq 'Domain' -and $Profile.IdentitySource -eq 'LDAP' -and
-        $Profile.IdentityStatus -eq 'Directory verified' -and $Profile.VerifiedAtUtc -and
-        $Profile.DirectorySid -eq $Profile.ProfileSid -and $Profile.SfsuId -match '^p?\d{1,32}$' -and
-        $Profile.SfsuId -ceq $Profile.SamAccountName -and $Profile.SfsuId -ceq (Get-SfsuProfileFolderId $Profile.ProfilePath) -and
-        -not [string]::IsNullOrWhiteSpace($Profile.DisplayName)
-}
-
 function Set-SfsuProfileRows([object[]]$Profiles) {
     $grid=$script:SfsuUi.Profiles; $grid.Rows.Clear()
     foreach ($profile in $Profiles) {
@@ -301,10 +293,10 @@ function New-SfsuAuthenticationDialog {
     $dialog.Text='Authenticate to Active Directory'; $dialog.ClientSize=New-Object Drawing.Size(540,345)
     $dialog.StartPosition='CenterParent'; $dialog.FormBorderStyle='FixedDialog'; $dialog.MaximizeBox=$false; $dialog.MinimizeBox=$false
     $dialog.Font=$script:SfsuUi.Form.Font
-    $hint=New-Object Windows.Forms.Label; $hint.Name='AuthenticationHeading'; $hint.Text='Enter your SFSU ID and password'
+    $hint=New-Object Windows.Forms.Label; $hint.Name='AuthenticationHeading'; $hint.Text='Enter your SFSU account login and password'
     $hint.Font=New-Object Drawing.Font($dialog.Font.FontFamily,([single]($dialog.Font.SizeInPoints*1.25)),[Drawing.FontStyle]::Bold)
     $hint.SetBounds(18,16,504,30); $dialog.Controls.Add($hint)
-    $userLabel=New-Object Windows.Forms.Label; $userLabel.Text='Standard SFSU &ID (no p-accounts)'; $userLabel.SetBounds(18,56,504,25); $dialog.Controls.Add($userLabel)
+    $userLabel=New-Object Windows.Forms.Label; $userLabel.Text='SFSU account &login or UPN'; $userLabel.SetBounds(18,56,504,25); $dialog.Controls.Add($userLabel)
     $user=New-Object Windows.Forms.TextBox; $user.Name='SfsuLogin'; $user.SetBounds(18,84,504,28); $dialog.Controls.Add($user)
     if ($null -ne $script:SfsuUi.Credential) { $user.Text=$script:SfsuUi.Credential.UserName }
     $validation=New-Object Windows.Forms.Label; $validation.SetBounds(18,119,504,45); $dialog.Controls.Add($validation)
@@ -393,7 +385,7 @@ function New-SfsuAuthenticationDialog {
         $s.Heading.Font.Dispose()
         if ($null -ne $s.Credential) { $s.Credential.Password.Dispose(); $s.Credential=$null }
     })
-    $user.AccessibleName='Standard SFSU ID'; $user.AccessibleDescription='Enter your standard numeric account ID, optionally followed by @sfsu.edu. Power-user accounts cannot connect to AD; their profiles remain available for migration.'
+    $user.AccessibleName='SFSU account login or UPN'; $user.AccessibleDescription='Enter your account login or full university UPN. Letters, digits and p-prefixed accounts are supported. A university ID may differ from the account login.'
     $password.AccessibleName='Password'; $password.AccessibleDescription='Active Directory password. The entry is masked.'
     $ok.Name='PrimaryAction'
     Initialize-SfsuAccessibleStatus $validation 'Alert'
@@ -438,24 +430,26 @@ function Show-SfsuManualIdentity {
     $dialog.StartPosition='CenterParent'; $dialog.FormBorderStyle='FixedDialog'; $dialog.MaximizeBox=$false; $dialog.MinimizeBox=$false; $dialog.Font=$script:SfsuUi.Form.Font
     $hint=New-Object Windows.Forms.Label; $hint.Text='Profile: ' + $profile.ProfilePath; $hint.SetBounds(18,16,490,43); $dialog.Controls.Add($hint)
     $idLabel=New-Object Windows.Forms.Label; $idLabel.Text='SFSU ID'; $idLabel.SetBounds(18,72,100,25); $dialog.Controls.Add($idLabel)
-    $id=New-Object Windows.Forms.Label; $id.Text=$profile.SfsuId; $id.SetBounds(128,72,375,25); $dialog.Controls.Add($id)
-    if ($profile.AccountType -eq 'Local') { $idLabel.Text='Local Account'; $id.Text=$profile.AccountName }
+    $id=New-Object Windows.Forms.TextBox; $id.Name='ManualSfsuId'; $id.Text=$profile.SfsuId; $id.SetBounds(128,72,375,28); $dialog.Controls.Add($id)
+    $id.AccessibleName='SFSU ID for the selected profile'; $id.AccessibleDescription='Confirm the university ID with the display name. The profile SID identifies the source; the folder name is not used to infer an ID.'
+    if ($profile.AccountType -eq 'Local') { $idLabel.Text='Local Account'; $id.Text=$profile.AccountName; $id.ReadOnly=$true; $id.TabStop=$false; $id.AccessibleName='Local account name' }
     $nameLabel=New-Object Windows.Forms.Label; $nameLabel.Text='&Display name'; $nameLabel.SetBounds(18,115,105,25); $dialog.Controls.Add($nameLabel)
     $name=New-Object Windows.Forms.TextBox; $name.Text=$profile.DisplayName; $name.SetBounds(128,111,375,28); $dialog.Controls.Add($name)
-    $confirm=New-Object Windows.Forms.CheckBox; $confirm.Text='I confirm this display name belongs to the selected profile.'; $confirm.SetBounds(18,163,490,43); $dialog.Controls.Add($confirm)
+    $confirm=New-Object Windows.Forms.CheckBox; $confirm.Text='I confirm this ID/account and display name belong to the selected profile.'; $confirm.SetBounds(18,163,490,43); $dialog.Controls.Add($confirm)
     $ok=New-SfsuButton $dialog 'Assign Display Name' 165 175 229
     $cancel=New-SfsuButton $dialog 'Cancel' 355 148 229; $cancel.DialogResult='Cancel'
     $dialog.CancelButton=$cancel; $dialog.AcceptButton=$ok
-    $name.AccessibleName='Display name'; $confirm.AccessibleName='Confirm the display name belongs to this profile'; $ok.Name='PrimaryAction'
+    $name.AccessibleName='Display name'; $confirm.AccessibleName='Confirm the ID/account and display name belong to this profile'; $ok.Name='PrimaryAction'
     Initialize-SfsuDialogLayout $dialog @(
-        @{Control=$hint;Kind='Label';Lines=2},@{Control=$idLabel;Kind='Label';Lines=1},@{Control=$id;Kind='Label';Lines=1},
+        @{Control=$hint;Kind='Label';Lines=2},@{Control=$idLabel;Kind='Label';Lines=1},@{Control=$id;Kind='Input'},
         @{Control=$nameLabel;Kind='Label';Lines=1},@{Control=$name;Kind='Input'},@{Control=$confirm;Kind='Input'}
     ) @($cancel,$ok)
     $dialog.Add_Shown({[void]$name.Focus()}.GetNewClosure())
     Register-SfsuThemedDialog $dialog
     $ok.Add_Click({
         try {
-            Set-SfsuManualIdentity -Profile $profile -DisplayName $name.Text -Confirmed:$confirm.Checked | Out-Null
+            $manualId=''; if ($profile.AccountType -eq 'Domain') { $manualId=$id.Text }
+            Set-SfsuManualIdentity -Profile $profile -SfsuId $manualId -DisplayName $name.Text -Confirmed:$confirm.Checked | Out-Null
             $dialog.DialogResult='OK'; $dialog.Close()
         } catch { [void][Windows.Forms.MessageBox]::Show($dialog,$_.Exception.Message,'Check identity') }
     }.GetNewClosure())

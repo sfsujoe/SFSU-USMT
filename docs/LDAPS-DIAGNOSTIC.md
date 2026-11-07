@@ -4,9 +4,9 @@
 
 ## Run the diagnostic
 
-Run from the intended technician Windows session, using a standard SFSU account at the credential prompt. An elevated local-admin session is useful for matching the operational workflow, but elevation is not required by this script. Do not start a transcript or put a password on the command line.
+Run from the intended technician Windows session using an SFSU account login/UPN at the prompt. P-prefixed and alphabetic logins are supported through the same [identity policy](IDENTITY.md) as the app. Keep this script in the package's tools folder and include App/Scripts/Sfsu.Identity.psm1 and Sfsu.Identity.psd1. Elevation is not required; a local-admin session can match the operational workflow. Do not start a transcript or put a password on the command line.
 
-After transport checks, the script prints `Waiting for credentials in this PowerShell window` and asks for the standard ID and a masked password in that same window. It does not use a separate Get-Credential dialog, which can appear behind other windows on Windows PowerShell. Blank ID skips directory tests and still writes the transport report. Waiting for interactive input has no network timeout. An alias TLS failure does not block binding to a different explicitly selected DC whose TLS probe passed; the JSON report retains both results.
+After transport checks, the script prints `Waiting for credentials in this PowerShell window` and asks for an account login/UPN and masked password in that window. Blank login skips directory tests and still writes the report. Waiting for interactive input has no network timeout. An alias TLS failure does not block binding to a separately selected healthy DC; the report retains both results.
 
 Run the entire saved script using `powershell.exe -File`, as shown below. Report-path defaults are initialized after parameter binding from the saved script location, independent of the working directory. Pasted blocks/editor selections without a saved-file invocation path are rejected before network tests because the workers must reopen that file.
 
@@ -39,7 +39,7 @@ To verify a particular registered domain profile, supply its **source SID** and 
 .\tools\Test-SfsuLdaps.ps1 -Server DCS01.ad.sfsu.edu -BindServer DCS01.ad.sfsu.edu -ProfileSid 'S-1-5-21-111111-222222-333333-1101' -ExpectedAccountId 'p000000123'
 ```
 
-Use a designated test profile's SID as shown in the app's SID column or the local `ProfileList` registry. Profile values are queried but are not included in the report. A p-account can be the **lookup target**, never the credential. Without these parameters, the script looks up only the credential account, reads its SID and queries that SID again. The report labels this `CredentialAccountSidRoundTripOnly`; it does **not** establish agreement with any registered source profile.
+Use a designated test profile's SID from the app or local ProfileList registry. ExpectedAccountId is the full expected **SAM account name**, which may differ from a separately configured university-ID attribute. P-prefixed accounts can be lookup targets or credentials. Returned profile values are not included in reports. Without these parameters, the credential-account SID round-trip is labeled CredentialAccountSidRoundTripOnly and does not establish agreement with a registered source profile.
 
 To test the app's domain alias as the actual LDAP endpoint, explicitly select it:
 
@@ -62,7 +62,7 @@ Reports default to `tools/LdapsDiagnostics/ldaps-<UTC-time>-<random>.json`, excl
 | Bind | An explicit Kerberos LDAP bind succeeded on 636 using Windows LDAP's default certificate validation. No custom LDAP certificate callback is installed. TLS takes the transport protection role on 636; 389 separately requests SASL signing/sealing. |
 | LdapTls | Negotiated TLS and cipher strength on the **actual LDAP connection** after bind. Framework's enum lacks modern TLS names, so Schannel protocol bits are also recorded. Values containing 0x400/0x800 indicate TLS 1.2; 0x1000/0x2000 indicate TLS 1.3. The script stops before directory queries if modern TLS/at least 128-bit encryption is not observed. OS TLS policy governs this connection; the separate TLS 1.2 probe does not force LDAP's protocol, and this after-bind check cannot retroactively protect credentials on an obsolete OS configuration. |
 | RootDSE | A bounded base query returned a default naming context. |
-| Lookup / IdentityChecks | An escaped binary-SID query returned exactly one user with matching SID/full account ID and a populated display name. UPN-convention agreement is recorded separately; disagreement is visible but is not a new app verification rule. Searches request only required identity attributes, have size limit two, eight-second default time limits and no referrals. |
+| Lookup / IdentityChecks | An escaped binary-SID query returned exactly one user with matching SID/SAM account name and a populated display name. Credential-account testing first searches the escaped literal UPN and reads the actual SAM name/SID; CredentialUpnMatches must pass. That check is null for an explicitly supplied profile target. No UPN-prefix/SAM equality convention is assumed. Searches retain size limit two, bounded time limits and no referrals. |
 | Comparison389 | Same-account/same-controller Kerberos bind, RootDSE and SID lookup with signing/sealing on 389. Requested only by Compare389 after LDAPS passes. |
 | EndpointChannelBindingAvailable | The **separate SslStream probe** could obtain a TLS endpoint channel-binding token. This does not show that LdapConnection sent a token or that AD enforced one. |
 | WorkerTimedOut | A child process exceeded the 45-second default hard deadline and was terminated. The exact blocked native substage may be unknown. No further credential attempts occur. |

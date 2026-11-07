@@ -3,6 +3,7 @@
 param([switch]$IncludeUi)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+trap { [Console]::Error.WriteLine($_.ScriptStackTrace); break }
 $repository=Split-Path $PSScriptRoot -Parent
 $script:Assertions=0
 function Assert-True([bool]$Condition,[string]$Message) {
@@ -27,7 +28,7 @@ $testRoot=Join-Path $PSScriptRoot ('.work/inventory-'+[guid]::NewGuid().ToString
 [void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'App/Scripts'))
 [void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'App/Reporting'))
 Copy-Item -LiteralPath (Join-Path $repository 'App/Reporting/report.template.html') -Destination (Join-Path $testRoot 'App/Reporting/report.template.html')
-foreach ($name in @('Sfsu.Logging.psm1','Sfsu.Inventory.psm1')) { Copy-Item -LiteralPath (Join-Path $repository "App/Scripts/$name") -Destination (Join-Path $testRoot "App/Scripts/$name") }
+foreach ($name in @('Sfsu.Logging.psm1','Sfsu.Inventory.psm1','Sfsu.Identity.psd1','Sfsu.Identity.psm1')) { Copy-Item -LiteralPath (Join-Path $repository "App/Scripts/$name") -Destination (Join-Path $testRoot "App/Scripts/$name") }
 Import-Module (Join-Path $testRoot 'App/Scripts/Sfsu.Logging.psm1') -Force
 Import-Module (Join-Path $testRoot 'App/Scripts/Sfsu.Inventory.psm1') -Force
 $module=Get-Module Sfsu.Inventory
@@ -61,7 +62,7 @@ $fixtures=@(
 $profiles=@(Get-SfsuDomainProfiles)
 Assert-True ($profiles.Count -eq 1) 'The compatibility domain-only query retains its domain filter.'
 Assert-True ($profiles[0].ProfileSid -eq $domainSid) 'Profile SID is preserved independently of the directory name.'
-Assert-True ($profiles[0].SfsuId -ceq '000000123' -and $profiles[0].SfsuIdSource -eq 'ProfileDirectory') 'Domain SFSU ID is inferred from the profile folder, preserving leading zeros.'
+Assert-True (-not $profiles[0].SfsuId -and $profiles[0].SfsuIdSource -eq 'Unavailable') 'Domain IDs are not inferred from profile folder names.'
 $allProfiles=@(Get-SfsuProfiles)
 $localProfile=@($allProfiles | Where-Object AccountType -eq 'Local')[0]
 Assert-True ($allProfiles.Count -eq 2 -and $localProfile.ProfileSid -eq $localSid) 'General discovery includes local and domain user profiles but excludes system/missing profiles.'
@@ -133,8 +134,7 @@ Assert-True ($attempts[0].Details.Contains('SYNTHETIC-LAPTOP\LocalAdmin') -and $
 Assert-True ([IO.File]::ReadAllText($discovery.ReportPath).Contains('SYNTHETIC-LAPTOP\LocalAdmin')) 'The HTML report includes the attempted authentication context.'
 & $module { param($sid) $script:Records[$sid][0].SamAccountName='000000999' } $domainSid
 $folderConflict=Invoke-SfsuProfileDiscovery -PackageRoot $testRoot -Credential $credentialFixture
-Assert-True ($folderConflict.Profiles[0].SfsuId -ceq '000000123' -and $folderConflict.Profiles[0].IdentityStatus -match 'ID conflict') 'LDAP cannot silently overwrite an inferred folder ID with a different account ID.'
-Assert-Throws { Set-SfsuManualIdentity -Profile $folderConflict.Profiles[0] -DisplayName 'Wrong Account' -Confirmed } 'Assign Display Name cannot bypass a folder/directory ID conflict.'
+Assert-True ($folderConflict.Profiles[0].SfsuId -ceq '000000999' -and $folderConflict.Profiles[0].IdentitySource -eq 'LDAP') 'A changed account name on the same SID is independent of the older profile folder name.'
 & $module { param($sid) $script:Records[$sid][0].SamAccountName='000000123' } $domainSid
 $filter=& $module { param($sid) ConvertTo-SfsuSidFilter $sid } $domainSid
 Assert-True ($filter -match '^(\\[0-9a-f]{2})+$') 'SID filter uses binary hex escapes rather than filter text interpolation.'
@@ -144,9 +144,9 @@ $secretFixture='SYNTHETIC-password-must-not-be-logged-578'
 $credentialFixture=New-Object Management.Automation.PSCredential('000000123@sfsu.edu',(ConvertTo-SecureString $secretFixture -AsPlainText -Force))
 Assert-True ((ConvertTo-SfsuLogin ' 000000123 ') -ceq '000000123@sfsu.edu') 'Bare IDs normalize to SFSU Login while preserving leading zeros.'
 Assert-True ((ConvertTo-SfsuLogin '000000123@SFSU.EDU') -ceq '000000123@SFSU.EDU') 'A complete login is accepted without appending or rewriting its suffix.'
-Assert-Throws { ConvertTo-SfsuLogin ' p000000123 ' } 'Power-user AD sign-in is rejected.'
-Assert-Throws { ConvertTo-SfsuLogin 'p000000123@sfsu.edu' } 'Full power-user AD sign-in is rejected.'
-foreach ($invalidLogin in @('','person@sfsu.edu','000000123@example.invalid','EXAMPLE\tech','12 34','123@sfsu.edu@sfsu.edu','p','pp000000123','p000000123@example.invalid','p000000123@sfsu.edu@sfsu.edu','p12 34','x000000123')) {
+Assert-True ((ConvertTo-SfsuLogin ' p000000123 ') -ceq 'p000000123@sfsu.edu') 'Prefixed AD sign-in is accepted.'
+Assert-True ((ConvertTo-SfsuLogin 'person@sfsu.edu') -ceq 'person@sfsu.edu') 'Alphabetic full logins are accepted.'
+foreach ($invalidLogin in @('','000000123@example.invalid','EXAMPLE\tech','12 34','123@sfsu.edu@sfsu.edu','p000000123@example.invalid','p000000123@sfsu.edu@sfsu.edu','p12 34')) {
     Assert-Throws { ConvertTo-SfsuLogin $invalidLogin } ('Invalid/email login is rejected: ' + $invalidLogin)
 }
 $beforeAuthCim=& $module { $script:CimCalls }
@@ -185,7 +185,7 @@ $unresolved=Invoke-SfsuBackupPreparation -PackageRoot $testRoot -Profiles @($off
 Assert-True ($unresolved.Paths.Count -eq 0 -and $unresolved.Errors.Count -eq 1) 'Unresolved identity cannot produce a prepared folder.'
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $testRoot 'Backups'))) 'Unresolved profile did not create a backup folder.'
 Assert-Throws { Set-SfsuManualIdentity -Profile $offline.Profiles[0] -SfsuId '000000123' -DisplayName 'Manual Person' } 'Manual identity requires explicit confirmation.'
-Assert-Throws { Set-SfsuManualIdentity -Profile $offline.Profiles[0] -SfsuId '../unsafe' -DisplayName 'Manual Person' -Confirmed } 'Non-numeric IDs are rejected.'
+Assert-Throws { Set-SfsuManualIdentity -Profile $offline.Profiles[0] -SfsuId "bad`nID" -DisplayName 'Manual Person' -Confirmed } 'Control characters in IDs are rejected.'
 $manual=Set-SfsuManualIdentity -Profile $offline.Profiles[0] -SfsuId '000000123' -DisplayName 'Manual Person' -Confirmed
 Assert-True ($manual.IdentitySource -eq 'Manual' -and $manual.ManualConfirmed -and -not $manual.DirectorySid) 'Manual identity is labeled and detached from directory verification.'
 
@@ -245,7 +245,7 @@ Assert-True ($explicitRefresh.DirectoryStatus -eq 'Connected' -and $explicitJour
 Assert-True (-not $explicitJournal.Contains($secretFixture) -and -not [IO.File]::ReadAllText($explicitRefresh.ReportPath).Contains($secretFixture)) 'Name-refresh diagnostics omit the password.'
 & $module { param($sid) $script:Records[$sid][0].SamAccountName='000000999' } $domainSid
 $idChanged=Invoke-SfsuBackupInventory -PackageRoot $testRoot -LookupNames -Credential $credentialFixture
-Assert-True (@($idChanged.Backups | Where-Object FormerName).Count -eq 0) 'An account ID conflict does not produce a name-change claim.'
+Assert-True (@($idChanged.Backups | Where-Object FormerName).Count -eq 1) 'The same SID supports name refresh after account renaming.'
 $broken=Join-Path $testRoot 'Backups/broken-metadata'; [void][IO.Directory]::CreateDirectory($broken); [IO.File]::WriteAllText((Join-Path $broken 'backup.json'),'{truncated')
 $invalid=@(Get-SfsuBackupCatalog $testRoot | Where-Object Path -eq $broken)[0]
 Assert-True (-not $invalid.MetadataValid -and $invalid.Status -match 'Unreadable') 'Damaged metadata is visible but never trusted.'
@@ -260,7 +260,8 @@ $onlyLocal=& $module {
 } $localRoot
 Assert-True ($onlyLocal.Profiles.Count -eq 1 -and -not [IO.File]::ReadAllText((Join-Path $onlyLocal.RunDirectory 'events.jsonl')).Contains('Attempting LDAP connection')) 'A local-only computer requires no LDAP connection during discovery.'
 $unknownFolder=$verified.PSObject.Copy(); $unknownFolder.ProfilePath=Join-Path $testRoot 'unexpected-folder-name'
-Assert-Throws { Set-SfsuManualIdentity -Profile $unknownFolder -DisplayName 'Cannot Guess' -Confirmed } 'Unexpected nonnumeric domain folders are flagged rather than guessed or manually reidentified.'
+Set-SfsuManualIdentity -Profile $unknownFolder -SfsuId 'AB00123' -DisplayName 'Confirmed Person' -Confirmed | Out-Null
+Assert-True ($unknownFolder.SfsuId -ceq 'AB00123' -and $unknownFolder.ManualConfirmed) 'Manual domain ID confirmation is independent of the folder name.'
 Assert-Throws { Set-SfsuManualIdentity -Profile $localProfile -DisplayName '  ' -Confirmed } 'Local accounts also require a nonempty display name.'
 $localAssigned=Set-SfsuManualIdentity -Profile $localProfile -DisplayName 'Local Test Person' -Confirmed
 Assert-True (-not $localAssigned.SfsuId -and $localAssigned.ManualConfirmed -and -not $localAssigned.DirectorySid) 'Assigning a local display name does not invent domain identity.'
@@ -269,7 +270,7 @@ Assert-True ($localPrepared.Paths.Count -eq 1 -and $localPrepared.Errors.Count -
 $localBackup=$localPrepared.Paths[0]
 Assert-True ((Split-Path $localBackup -Leaf) -match '^Local-local-tech_Local Test Person_.+_\d{8}-\d{6}$') 'Local folder naming includes the actual local account name.'
 $localMetadata=ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $localBackup 'backup.json')))
-Assert-True ($localMetadata.SchemaVersion -eq 2 -and $localMetadata.Identity.AccountType -eq 'Local' -and $localMetadata.SourceProfile.Sid -eq $localSid -and -not $localMetadata.Identity.SfsuId) 'Local metadata records account type, username, and SID separately from SFSU identity.'
+Assert-True ($localMetadata.SchemaVersion -eq 3 -and $localMetadata.Identity.AccountType -eq 'Local' -and $localMetadata.SourceProfile.Sid -eq $localSid -and -not $localMetadata.Identity.SfsuId) 'Local metadata records account type, username, and SID separately from SFSU identity.'
 $localCatalog=Invoke-SfsuBackupInventory -PackageRoot $localRoot -LookupNames
 Assert-True ($localCatalog.Backups[0].MetadataValid -and $localCatalog.Backups[0].AccountName -eq 'local-tech' -and -not [IO.File]::ReadAllText((Join-Path $localCatalog.RunDirectory 'events.jsonl')).Contains('Attempting LDAP connection')) 'Local backups list and refresh offline without LDAP.'
 $localReview=Invoke-SfsuRestoreReview -PackageRoot $localRoot -Backups @($localCatalog.Backups[0])
@@ -282,8 +283,8 @@ foreach ($property in @('AccountType','AccountName','SfsuIdSource')) { $legacyDa
 $legacyFile=Join-Path $legacyFolder 'backup.json'; [IO.File]::WriteAllText($legacyFile,(ConvertTo-Json $legacyData -Depth 8))
 $legacyHash=(Get-FileHash $legacyFile).Hash
 $legacyRow=@(Get-SfsuBackupCatalog $localRoot | Where-Object Path -eq $legacyFolder)[0]
-Assert-True ($legacyRow.MetadataValid -and $legacyRow.AccountType -eq 'Domain' -and $legacyRow.SfsuId -ceq '000000123') 'Version-one domain metadata remains readable without rewriting existing backups.'
-Assert-True ((Get-FileHash $legacyFile).Hash -eq $legacyHash) 'Backward-compatible reading preserves original metadata bytes.'
+Assert-True (-not $legacyRow.MetadataValid) 'Earlier development metadata is unsupported.'
+Assert-True ((Get-FileHash $legacyFile).Hash -eq $legacyHash) 'Unsupported-version reading preserves the original metadata bytes.'
 $badLocalFolder=Join-Path $localRoot 'Backups/invalid-local'; [void][IO.Directory]::CreateDirectory($badLocalFolder)
 $localMetadata.Identity.SfsuId='000000123'
 [IO.File]::WriteAllText((Join-Path $badLocalFolder 'backup.json'),(ConvertTo-Json $localMetadata -Depth 8))
@@ -304,9 +305,9 @@ try {
     } $powerFixture $powerSid
     $powerDiscovery=Invoke-SfsuProfileDiscovery -PackageRoot $powerRoot -Credential $credentialFixture
     $powerVerified=$powerDiscovery.Profiles[0]
-    Assert-True ($powerVerified.SfsuId -ceq 'p000000123' -and $powerVerified.SfsuIdSource -eq 'ProfileDirectory') 'Power-user profile discovery retains the full prefixed folder ID.'
+    Assert-True ($powerVerified.SfsuId -ceq 'p000000123' -and $powerVerified.SfsuIdSource -eq 'LDAP') 'Profile discovery retains the full directory account ID.'
     Assert-True ($powerVerified.IdentitySource -eq 'LDAP' -and $powerVerified.DirectorySid -eq $powerSid -and $powerVerified.DisplayName -eq 'Synthetic Power User') 'Exact-SID LDAP verification accepts a matching power-user account and name.'
-    foreach ($mismatch in @('id','sid','name')) {
+    foreach ($mismatch in @('sid','name')) {
         & $module {
             param($sid,$kind,$otherSid)
             $record=$script:Records[$sid][0]
@@ -340,7 +341,7 @@ try {
     Assert-True ($powerRenamed.Backups[0].FormerName -eq 'Synthetic Power User' -and $powerRenamed.Backups[0].DisplayName -eq 'Renamed Power User') 'Current-name refresh verifies a prefixed account ID.'
     & $module { param($sid) $script:Records[$sid][0].SamAccountName='000000123' } $powerSid
     $powerWrongAccount=Invoke-SfsuBackupInventory -PackageRoot $powerRoot -LookupNames -Credential $credentialFixture
-    Assert-True (-not $powerWrongAccount.Backups[0].FormerName -and $powerWrongAccount.Backups[0].DisplayName -eq 'Synthetic Power User') 'The regular account cannot supply a power-user rename.'
+    Assert-True ($powerWrongAccount.Backups[0].FormerName -eq 'Synthetic Power User' -and $powerWrongAccount.Backups[0].DisplayName -eq 'Renamed Power User') 'A renamed account with the same SID can supply the current display name.'
     Assert-True ((Get-FileHash $powerManifest).Hash -eq $powerHash) 'Power-user refresh preserves historical metadata.'
     $powerForged=$powerVerified.PSObject.Copy(); $powerForged.SamAccountName='000000123'
     $powerBlocked=Invoke-SfsuBackupPreparation -PackageRoot $powerRoot -Profiles @($powerForged)
@@ -355,6 +356,116 @@ try {
     $powerLocal=@(Get-SfsuProfiles)[0]
     Assert-True ($powerLocal.AccountType -eq 'Local' -and -not $powerLocal.SfsuId) 'A p-prefixed local profile folder does not imply a domain account.'
 } finally { & $module { param($items) $script:Fixtures=$items } $savedFixtures }
+
+# Generalized identities: arbitrary folder names, longer IDs, letters and
+# independent directory attributes. Every directory response is synthetic.
+$generalFixtures=& $module { $script:Fixtures }
+$generalRecords=& $module { $script:Records }
+$generalPolicy=& $module { $script:IdentityPolicy.Clone() }
+try {
+    $caseIndex=0
+    foreach ($textId in @('0000000123',(('0'*40)+'123'),('x'*256),'AB00123','pAlpha42','AB.SFSU.000',('ID'+[char]0x03A9+'001'))) {
+        $caseIndex++
+        $caseRoot=Join-Path $testRoot ('generalized-'+$caseIndex)
+        $oldProfilePath=Join-Path $caseRoot 'old-unrelated-folder'
+        [void][IO.Directory]::CreateDirectory($oldProfilePath)
+        & $module {
+            param($sid,$path,$id)
+            $script:Fixtures=@([pscustomobject]@{SID=$sid;LocalPath=$path;Special=$false;Loaded=$false})
+            $script:Records=@{$sid=@([pscustomobject]@{Sid=$sid;SamAccountName=$id;UserPrincipalName='separate.login@sfsu.edu';DisplayName='Generalized Person'})}
+        } $domainSid $oldProfilePath $textId
+        $result=Invoke-SfsuProfileDiscovery -PackageRoot $caseRoot -Credential $credentialFixture
+        $generalProfile=$result.Profiles[0]
+        Assert-True (Test-SfsuProfileVerified $generalProfile) 'Exact-SID verification accepts the generalized ID regardless of the folder name.'
+        Assert-True ($generalProfile.SfsuId -ceq $textId -and $generalProfile.UserPrincipalName -eq 'separate.login@sfsu.edu') 'ID text is preserved separately from the full login name.'
+        Assert-True ((ConvertTo-SfsuLogin $textId) -ceq ($textId+'@sfsu.edu')) 'Long, alphabetic, dotted and Unicode bare account logins preserve their text.'
+        $generalPrepared=Invoke-SfsuBackupPreparation -PackageRoot $caseRoot -Profiles @($generalProfile)
+        Assert-True ($generalPrepared.Paths.Count -eq 1 -and $generalPrepared.Errors.Count -eq 0) ('Generalized identities prepare successfully: '+($generalPrepared.Errors -join '; '))
+        $generalCatalog=@(Get-SfsuBackupCatalog $caseRoot)
+        Assert-True ($generalCatalog.Count -eq 1 -and $generalCatalog[0].MetadataValid -and $generalCatalog[0].SfsuId -ceq $textId) 'Version-three metadata round-trips the full ID even when the folder label is shortened.'
+    }
+    # Change the configured ID mapping without changing either login attribute.
+    & $module { $script:IdentityPolicy.IdAttribute='employeeID' }
+    $customId='A/001:alpha'
+    & $module {
+        param($sid,$id)
+        $script:Records[$sid]=@([pscustomobject]@{Sid=$sid;SamAccountName='campus.login';UserPrincipalName='different.login@sfsu.edu';DisplayName='Custom Attribute Person';SfsuId=$id})
+    } $domainSid $customId
+    $customRoot=Join-Path $testRoot 'custom-attribute'
+    [void][IO.Directory]::CreateDirectory($customRoot)
+    $customProfile=(Invoke-SfsuProfileDiscovery -PackageRoot $customRoot -Credential $credentialFixture).Profiles[0]
+    Assert-True ((Test-SfsuProfileVerified $customProfile) -and $customProfile.SfsuIdAttribute -eq 'employeeID' -and $customProfile.AccountName -eq 'campus.login') 'Configured university ID and Windows account name are independent.'
+    $customPrepared=Invoke-SfsuBackupPreparation -PackageRoot $customRoot -Profiles @($customProfile)
+    Assert-True ($customPrepared.Paths.Count -eq 1 -and (Split-Path $customPrepared.Paths[0] -Leaf).StartsWith('A-001-alpha_')) 'Only the filesystem label is sanitized.'
+    $customManifestPath=Join-Path $customPrepared.Paths[0] 'backup.json'
+    $customManifest=[IO.File]::ReadAllText($customManifestPath)
+    $customData=ConvertFrom-Json $customManifest
+    Assert-True ($customData.Identity.SfsuId -ceq $customId -and $customData.Identity.SamAccountName -eq 'campus.login' -and $customData.Identity.UserPrincipalName -eq 'different.login@sfsu.edu') 'Metadata retains exact separate ID, SAM account and UPN values.'
+    & $module { $script:IdentityPolicy.IdAttribute='sAMAccountName' }
+    Assert-True (@(Get-SfsuBackupCatalog $customRoot)[0].MetadataValid) 'Saved attribute provenance remains readable after a configuration change.'
+    foreach ($oldVersion in @(1,2)) {
+        $customData.SchemaVersion=$oldVersion
+        [IO.File]::WriteAllText($customManifestPath,(ConvertTo-Json $customData -Depth 8))
+        Assert-True (-not @(Get-SfsuBackupCatalog $customRoot)[0].MetadataValid) 'Earlier development versions are refused without conversion or deletion.'
+    }
+    [IO.File]::WriteAllText($customManifestPath,$customManifest)
+    # Exercise the actual LDAP reader, rather than only a resolver mock.
+    $tokens=$null; $problems=$null
+    $inventoryAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $repository 'App/Scripts/Sfsu.Inventory.psm1'),[ref]$tokens,[ref]$problems)
+    $readerDefinition=$inventoryAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-SfsuDirectoryRecords'},$false).Extent.Text
+    $sidObject=New-Object Security.Principal.SecurityIdentifier($domainSid)
+    $sidBytes=New-Object byte[] $sidObject.BinaryLength; $sidObject.GetBinaryForm($sidBytes,0)
+    $attributes=@{sAMAccountName=@('campus.login');userPrincipalName=@('different.login@sfsu.edu');displayName=@('Custom Attribute Person');employeeID=@($customId);objectSid=@(,$sidBytes)}
+    $fakeLdap=[pscustomobject]@{Request=$null;Response=[pscustomobject]@{Entries=@([pscustomobject]@{Attributes=$attributes})}}
+    $fakeLdap | Add-Member ScriptMethod SendRequest { param($request) $this.Request=$request; $this.Response }
+    & $module { $script:IdentityPolicy.IdAttribute='employeeID' }
+    $actualRecords=@(& $module {
+        param($definition,$connection,$sid)
+        . ([scriptblock]::Create($definition))
+        Get-SfsuDirectoryRecords -Session ([pscustomobject]@{Connection=$connection;SearchBase='DC=example,DC=invalid'}) -Sid $sid
+    } $readerDefinition $fakeLdap $domainSid)
+    Assert-True ($actualRecords.Count -eq 1 -and $actualRecords[0].SfsuId -ceq $customId -and $actualRecords[0].Sid -eq $domainSid) 'The real LDAP reader reads the configured single-valued attribute and binary SID.'
+    Assert-True ($fakeLdap.Request.Attributes.Contains('employeeID') -and $fakeLdap.Request.Filter -notlike '*A/001*' -and $fakeLdap.Request.Filter -match 'objectSid=\\[0-9a-f]') 'Only binary SID enters the search filter; configured ID attributes are requested explicitly.'
+    $attributes.employeeID=@('one','two')
+    $ambiguousRecords=@(& $module {
+        param($definition,$connection,$sid)
+        . ([scriptblock]::Create($definition))
+        Get-SfsuDirectoryRecords -Session ([pscustomobject]@{Connection=$connection;SearchBase='DC=example,DC=invalid'}) -Sid $sid
+    } $readerDefinition $fakeLdap $domainSid)
+    Assert-True (-not $ambiguousRecords[0].SfsuId) 'A multivalued ID attribute is not guessed.'
+    $attributes.Remove('employeeID')
+    $missingRecords=@(& $module {
+        param($definition,$connection,$sid)
+        . ([scriptblock]::Create($definition))
+        Get-SfsuDirectoryRecords -Session ([pscustomobject]@{Connection=$connection;SearchBase='DC=example,DC=invalid'}) -Sid $sid
+    } $readerDefinition $fakeLdap $domainSid)
+    Assert-True (-not $missingRecords[0].SfsuId) 'A missing configured attribute is not replaced with an account-name guess.'
+    foreach ($badId in @('',('x'*257),"has space","bad`nID",('bad'+[char]0x202E+'ID'))) {
+        Assert-True (-not (Test-SfsuIdentityText $badId)) 'Blank, oversized, whitespace and control/format IDs are rejected.'
+    }
+    Assert-True (Test-SfsuIdentityText ('x'*256)) 'The documented ID text boundary is accepted.'
+    Assert-Throws { ConvertTo-SfsuLogin ('x'*257) } 'Oversized account logins are rejected.'
+    # Read the real shared policy file with alternate suffixes and malformed data.
+    $policyPath=Join-Path $testRoot 'App/Scripts/Sfsu.Identity.psd1'
+    $savedPolicy=[IO.File]::ReadAllText($policyPath)
+    try {
+        [IO.File]::WriteAllText($policyPath,"@{IdAttribute='employeeID';DefaultLoginSuffix='new.example.edu';AllowedLoginSuffixes=@('new.example.edu','sfsu.edu')}")
+        $newPolicy=& $module { Get-SfsuIdentityPolicy }
+        Assert-True ($newPolicy.IdAttribute -eq 'employeeID' -and $newPolicy.DefaultLoginSuffix -eq 'new.example.edu') 'The shared configuration accepts an alternate ID mapping and login suffix.'
+        $identityModule=& $module { Get-Module Sfsu.Identity }
+        $savedLoginPolicy=& $identityModule { $script:IdentityPolicy }
+        try {
+            & $identityModule { param($policy) $script:IdentityPolicy=$policy } $newPolicy
+            Assert-True ((ConvertTo-SfsuLogin 'pAlpha') -eq 'pAlpha@new.example.edu' -and (ConvertTo-SfsuLogin 'AB001@sfsu.edu') -eq 'AB001@sfsu.edu') 'Default and alternate allowed suffixes share the centralized normalization.'
+        } finally { & $identityModule { param($policy) $script:IdentityPolicy=$policy } $savedLoginPolicy }
+        foreach ($invalidPolicy in @("@{IdAttribute='employeeID)(x=*';DefaultLoginSuffix='sfsu.edu';AllowedLoginSuffixes=@('sfsu.edu')}","@{IdAttribute='employeeID';DefaultLoginSuffix='other.invalid';AllowedLoginSuffixes=@('sfsu.edu')}",'@{ broken')) {
+            [IO.File]::WriteAllText($policyPath,$invalidPolicy)
+            Assert-Throws { & $module { Get-SfsuIdentityPolicy } } 'Malformed or inconsistent identity configuration fails closed.'
+        }
+    } finally { [IO.File]::WriteAllText($policyPath,$savedPolicy) }
+} finally {
+    & $module { param($items,$records,$policy) $script:Fixtures=$items; $script:Records=$records; $script:IdentityPolicy=$policy } $generalFixtures $generalRecords $generalPolicy
+}
 
 if ($IncludeUi) {
     $uiManualFixture=$manual
@@ -447,14 +558,14 @@ if ($IncludeUi) {
             $testDialogWindow=@([Windows.Forms.Application]::OpenForms | Where-Object Text -eq 'Assign Display Name')
             if ($testDialogWindow.Count -eq 0) { return }; $manualTimer.Stop()
             $fields=@($testDialogWindow[0].Controls | Where-Object { $_ -is [Windows.Forms.TextBox] } | Sort-Object Top)
-            if ($fields.Count -ne 1) { throw 'Assign Display Name must ask only for a name.' }
-            $fields[0].Text='Synthetic Manual UI'
+            if ($fields.Count -ne 2) { throw 'Manual domain identity requires ID and name fields.' }
+            $fields[0].Text='AB00123'; $fields[1].Text='Synthetic Manual UI'
             ($testDialogWindow[0].Controls | Where-Object { $_ -is [Windows.Forms.CheckBox] }).Checked=$true
             ($testDialogWindow[0].Controls | Where-Object { $_ -is [Windows.Forms.Button] -and $_.Text -eq 'Assign Display Name' }).PerformClick()
         })
         $manualTimer.Start()
         try { Show-SfsuManualIdentity } finally { $manualTimer.Dispose() }
-        Assert-True ($manualUiProfile.IdentitySource -eq 'Manual' -and $manualUiProfile.SfsuId -ceq '000000123') 'Assign Display Name preserves the inferred ID and confirms only the name.'
+        Assert-True ($manualUiProfile.IdentitySource -eq 'Manual' -and $manualUiProfile.SfsuId -ceq 'AB00123') 'Manual identity accepts an explicitly confirmed alphabetic ID and display name in the actual dialog.'
         Assert-True (-not $script:SfsuUi.Profiles.Rows[0].Cells['Verified'].Value) 'Assigning a name manually clears any AD verification mark.'
         Set-SfsuProfileRows @($localAssigned)
         Assert-True ($script:SfsuUi.Profiles.Rows[0].Cells['SfsuId'].Value -eq 'Local Account') 'Local profiles display Local Account in the SFSU ID column.'
@@ -464,8 +575,8 @@ if ($IncludeUi) {
             $window=@([Windows.Forms.Application]::OpenForms | Where-Object Text -eq 'Assign Display Name')
             if (-not $window.Count) { return }; $localNameTimer.Stop()
             $field=@($window[0].Controls | Where-Object { $_ -is [Windows.Forms.TextBox] })
-            $script:LocalNameOnly=($field.Count -eq 1 -and @($window[0].Controls | Where-Object Text -eq 'local-tech').Count -eq 1)
-            $field[0].Text='Synthetic Local UI'
+            $script:LocalNameOnly=(@($field | Where-Object { -not $_.ReadOnly }).Count -eq 1 -and @($field | Where-Object Text -eq 'local-tech').Count -eq 1)
+            ($field | Where-Object { -not $_.ReadOnly }).Text='Synthetic Local UI'
             ($window[0].Controls | Where-Object { $_ -is [Windows.Forms.CheckBox] }).Checked=$true
             $bitmap=New-Object Drawing.Bitmap($window[0].Width,$window[0].Height)
             try { $window[0].DrawToBitmap($bitmap,(New-Object Drawing.Rectangle(0,0,$bitmap.Width,$bitmap.Height))); $bitmap.Save((Join-Path $testRoot 'assign-local-name.png')) } finally { $bitmap.Dispose() }

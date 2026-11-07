@@ -4,7 +4,7 @@
 Read-only Windows PowerShell diagnostic for SFSU LDAPS and Kerberos LDAP.
 .DESCRIPTION
 No RSAT/ADWS or domain membership required for discovery. Uses DNS SRV records,
-strict TLS certificate validation with revocation checking, explicit standard
+strict TLS certificate validation with revocation checking, explicit SFSU
 credentials, Kerberos only, and exact-account/SID searches. Credentials are sent
 to one selected DC only; no automatic password retries or authentication fallback.
 Child processes bound DNS/TLS/LDAP execution, including native blocking calls.
@@ -55,17 +55,19 @@ function Assert-DiagnosticDnsName([string]$Name) {
 }
 
 function ConvertTo-DiagnosticLogin([string]$Name) {
-    $nameValue = $Name.Trim()
-    if ($nameValue -match '^\d{1,32}$') { return ($nameValue+'@sfsu.edu') }
-    if ($nameValue -match '^\d{1,32}@sfsu\.edu$') { return $nameValue.ToLowerInvariant() }
-    throw 'Use a standard numeric SFSU ID, optionally followed by @sfsu.edu. Power-user credentials are not allowed.'
+    Import-Module (Join-Path ([IO.Path]::GetDirectoryName($script:DiagnosticScriptPath)) '../App/Scripts/Sfsu.Identity.psm1') -ErrorAction Stop
+    ConvertTo-SfsuLogin $Name
+}
+
+function ConvertTo-DiagnosticFilterValue([string]$Value) {
+    $Value.Replace('\','\5c').Replace('*','\2a').Replace('(','\28').Replace(')','\29').Replace([string][char]0,'\00')
 }
 
 function Read-DiagnosticCredential([string]$SelectedServer) {
     # Get-Credential can open a background modal window in Windows PowerShell.
     # Keep both prompts in this host and never read the password as plain text.
     Write-Host ('Waiting for credentials in this PowerShell window for '+$SelectedServer+'.')
-    $account=Read-Host 'Standard SFSU ID (blank to skip directory tests)'
+    $account=Read-Host 'SFSU account login or UPN (blank to skip directory tests)'
     if ([string]::IsNullOrWhiteSpace($account)) { return $null }
     $login=ConvertTo-DiagnosticLogin $account
     $password=Read-Host 'SFSU password' -AsSecureString
@@ -229,7 +231,7 @@ function Invoke-DiagnosticDirectory($InputData) {
         $base=[string]$response.Entries[0].Attributes['defaultNamingContext'][0]
         $r.RootDse='Passed'
         $r.Stage='Lookup'
-        $expectedId=($login -split '@')[0]
+        $expectedId=''
         $expectedSid=[string]$InputData.ProfileSid
         $scope='CredentialAccountSidRoundTripOnly'
         if ($expectedSid) { $scope='SuppliedProfileSidAndAccount'; $expectedId=[string]$InputData.ExpectedAccountId }
@@ -239,12 +241,14 @@ function Invoke-DiagnosticDirectory($InputData) {
         if (-not $expectedSid) {
             $own=New-Object DirectoryServices.Protocols.SearchRequest
             $own.DistinguishedName=$base; $own.Scope='Subtree'
-            $own.Filter='(&(objectCategory=person)(objectClass=user)(sAMAccountName='+$expectedId+'))'
-            [void]$own.Attributes.Add('objectSid'); $own.SizeLimit=2; $own.TimeLimit=[TimeSpan]::FromSeconds($InputData.Timeout)
+            $own.Filter='(&(objectCategory=person)(objectClass=user)(userPrincipalName='+(ConvertTo-DiagnosticFilterValue $login)+'))'
+            foreach ($attribute in @('objectSid','sAMAccountName')) { [void]$own.Attributes.Add($attribute) }
+            $own.SizeLimit=2; $own.TimeLimit=[TimeSpan]::FromSeconds($InputData.Timeout)
             $found=$ldap.SendRequest($own)
-            if ($found.Entries.Count -ne 1 -or -not $found.Entries[0].Attributes.Contains('objectSid')) { throw 'Credential account did not return exactly one SID.' }
+            if ($found.Entries.Count -ne 1 -or -not $found.Entries[0].Attributes.Contains('objectSid') -or -not $found.Entries[0].Attributes.Contains('sAMAccountName')) { throw 'Credential account did not return exactly one SID/account name.' }
             $sidObject=[Security.Principal.SecurityIdentifier]::new([byte[]]$found.Entries[0].Attributes['objectSid'][0],0)
             $expectedSid=$sidObject.Value
+            $expectedId=[string]$found.Entries[0].Attributes['sAMAccountName'][0]
         }
         $sidObject=New-Object Security.Principal.SecurityIdentifier($expectedSid)
         $bytes=New-Object byte[] $sidObject.BinaryLength; $sidObject.GetBinaryForm($bytes,0)
@@ -263,10 +267,11 @@ function Invoke-DiagnosticDirectory($InputData) {
         $returnedSid=[Security.Principal.SecurityIdentifier]::new([byte[]]$entry.Attributes['objectSid'][0],0).Value
         $checks=[ordered]@{ ExactlyOneResult=$true; SidMatches=($returnedSid -eq $expectedSid)
             AccountIdMatches=([string]$entry.Attributes['sAMAccountName'][0] -ieq $expectedId)
-            UpnMatchesConvention=([string]$entry.Attributes['userPrincipalName'][0] -ieq ($expectedId+'@sfsu.edu'))
+            CredentialUpnMatches=$null
             DisplayNamePresent=(-not [string]::IsNullOrWhiteSpace([string]$entry.Attributes['displayName'][0])) }
+        if ($scope -eq 'CredentialAccountSidRoundTripOnly') { $checks.CredentialUpnMatches=([string]$entry.Attributes['userPrincipalName'][0] -ieq $login) }
         $r.IdentityChecks=$checks
-        if (-not $checks.SidMatches -or -not $checks.AccountIdMatches -or -not $checks.DisplayNamePresent) { throw 'Directory identity checks failed.' }
+        if (-not $checks.SidMatches -or -not $checks.AccountIdMatches -or -not $checks.DisplayNamePresent -or $checks.CredentialUpnMatches -eq $false) { throw 'Directory identity checks failed.' }
         $r.Lookup='Passed'; $r.Stage='Complete'; $r.Status='Passed'
     } catch {
         if ($r.Stage -eq 'Bind') { $r.Bind='Failed' }
@@ -355,7 +360,7 @@ foreach ($name in $Server) { Assert-DiagnosticDnsName $name }
 if ([bool]$ProfileSid -ne [bool]$ExpectedAccountId) { throw 'Supply both -ProfileSid and -ExpectedAccountId, or neither.' }
 if ($ProfileSid) {
     [void](New-Object Security.Principal.SecurityIdentifier($ProfileSid))
-    if ($ExpectedAccountId -notmatch '^p?\d{1,32}$') { throw 'ExpectedAccountId must be a numeric or p-prefixed numeric profile ID.' }
+    if ($ExpectedAccountId.Length -gt 256 -or $ExpectedAccountId -match '[\s\p{C}]') { throw 'ExpectedAccountId must be nonempty account-name text of at most 256 characters.' }
 }
 if ($TransportOnly -and ($Compare389 -or $Credential -or $ProfileSid)) { throw 'TransportOnly cannot be combined with credential, profile or Compare389 options.' }
 
@@ -363,7 +368,7 @@ $report=[ordered]@{SchemaVersion=1;StartedUtc=[DateTime]::UtcNow.ToString('o');F
     Domain=$Domain;Context=$null;Discovery=$null;Transport=@();Directory=$null;Comparison389=$null
     ChannelBinding='NotProven: ask AD administrators for effective policy and correlated DC audit evidence.'
     CertificateScope='Strict SslStream TLS 1.2/revocation probe; separate LDAP connection uses Windows default certificate validation. Certificates are not pinned between these connections.'
-    AuthenticationPolicy='Explicit standard SFSU account; Kerberos only; one DC; no automatic retries, NTLM, simple bind, or implicit Windows credentials.'
+    AuthenticationPolicy='Explicit SFSU account; shared login policy; Kerberos only; one DC; no automatic retries, NTLM, simple bind, or implicit Windows credentials.'
     Notes=@();Overall='Incomplete'}
 Write-Host 'SFSU LDAPS diagnostic - no directory writes or migrations.'
 $report.Context=Invoke-DiagnosticWorker 'Context' @{} $WorkerTimeoutSeconds
