@@ -137,6 +137,8 @@ try {
 } finally { $form.Dispose() }
 '@
 [IO.File]::WriteAllText($uiPath,$uiSource.Replace($showCall,$startupProbe))
+# This fixture checks layout only; it must never ask the operator for UAC.
+[IO.File]::WriteAllText((Join-Path $testRoot 'App/Scripts/Sfsu.Launch.psm1'),'function Test-SfsuAdministrator { $true }')
 & powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File (Join-Path $testRoot 'App/Scripts/Start-SfsuUsmt.ps1')
 Assert-True ($LASTEXITCODE -eq 0) 'The normal startup configuration probe exits cleanly without displaying the GUI.'
 $startup=ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $testRoot 'startup-probe.json')))

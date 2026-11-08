@@ -1,12 +1,12 @@
 # SFSU USMT reporting
 
-The reporting layer and portable application are implemented. The normal GUI now logs real profile discovery, signed/sealed LDAP lookup, backup-folder/metadata preparation, backup inventory, and restore-selection review. **Backup and restore engines are not connected.** See [Application testing](APP-TESTING.md). Live reports identify the actual operation and never claim that folder preparation captured employee data.
+The reporting layer and native migration engine are connected. The GUI logs discovery, protected LDAP lookup, cloud/browser review, capture estimates, native capture/restore, store verification and local-account finalization. See [Application testing](APP-TESTING.md) and [migration evidence/limits](MIGRATION.md). PreparedOnly records never claim captured data; native integrity/profile checks never claim intended-user EFS decryption or exhaustive content comparison. No real migration has been validated by the synthetic suites.
 
 Developer-only headless samples remain for testing the report renderer. Samples never run ScanState, LoadState, UsmtUtils, account changes, or employee-data copies. A sample verifies only that its Backups folder accepts a temporary write; its capture/verification events and diagnostic file are synthetic.
 
 ## Try the reports
 
-Open `sfsu-usmt.cmd` for the real discovery/preparation GUI. Use **Open latest report** or **Open Logs folder** after an action to find its actual journal and HTML report. Preparation reports are also copied into the prepared folders. The launcher applies execution-policy Bypass only to its PowerShell process; it does not change saved policies or elevate automatically.
+Open `sfsu-usmt.cmd` for the elevated GUI. Use **Open latest report** or **Open Logs folder** for its actual journal/HTML/native evidence. Finalized reports are copied beside backups; root logs remain authoritative if snapshots fail. GUI startup requests elevation; Bypass remains process-only and no saved policy changes occur. Developer/headless actions retain caller privileges.
 
 For an explicitly synthetic developer sample without opening a window (Completed, Warnings, Failed, Cancelled, or Incomplete):
 
@@ -82,7 +82,9 @@ A copy failure leaves the original root logs available, writes `snapshot-error.t
 | `Update-SfsuLogReport` | Rebuild HTML from saved events without running USMT. |
 | `Export-SfsuLogSnapshot` | Preserve finalized report/journal/raw-log copies alongside an existing backup. |
 
-The caller remains responsible for performing the checks and supplying truthful evidence. The logging module does not execute or interpret USMT commands, verify stores, establish account mappings, or prove restore fidelity. Keep passwords, credential objects, and encryption keys out of all messages/details. LDAP attempt diagnostics intentionally include account-name strings and credential source, with the Windows execution identity distinguished from an independently verified outbound account. Define backup identities, data coverage, engine return-code handling, and acceptance criteria before connecting migrations.
+The caller remains responsible for supplying truthful evidence. Sfsu.Engine now supervises USMT, classifies return codes/native diagnostics, verifies stores and applies the agreed local-account choices; the logging module itself does not migrate data or prove restore fidelity. Keep passwords/credential objects out of messages/details. LDAP diagnostics intentionally include account strings and source, distinguishing Windows execution identity from independently verified outbound identity. Native exit 3/error/warning/nonfatal evidence is retained. EFS/application acceptance remains an explicit warning even after native integrity/profile checks succeed.
+
+Raw-log hyperlinks use metadata-only inspection with full sharing, retaining no-follow/single-link and guarded ancestors. This permits report refresh while a native writer owns the file, including an exclusive writer. Uninspectable/unsafe links are omitted with a visible warning instead of breaking the whole report. Progress/diagnostic content readers use shared read handles; protected writes, journals, metadata and store holds retain their stricter sharing. During a running native command, optional progress/HTML observation failures are reported as warnings without terminating the job. After the child ends, required journal/result failures still stop later stages; no successful verification is invented. Restart the app after updating the helper because its native type is process-scoped.
 
 ## Validation
 

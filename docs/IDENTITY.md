@@ -1,6 +1,6 @@
 # Identity configuration and verification
 
-University IDs, Windows account names, UPNs and source-profile paths are separate values. The registered profile SID anchors domain-account verification. An account rename or an older, unrelated profile-folder name does not invalidate a matching SID. A different SID, including a deleted-and-recreated account using the same name, is never accepted as that original account. This application still performs discovery and metadata-only preparation; no migration engine is connected.
+University IDs, Windows account names, UPNs and source-profile paths are separate values. The registered profile SID anchors domain-account verification. An account rename or unrelated profile-folder name does not invalidate a matching SID. A different SID is never accepted as the original domain account. The connected [native engine](MIGRATION.md) selects exact source SIDs; recreated local accounts are the explicitly supported new-SID exception under the same local name.
 
 ## Shared configuration
 
@@ -37,11 +37,13 @@ Domain candidates start with no inferred university ID or account name. AD verif
 
 Without AD, **Assign Display Name** asks for an explicitly confirmed domain ID and display name, tied to the selected profile SID/path. It does not guess either value from the folder name. Local accounts show a read-only account name and require only a display name. Manual assignment clears previous AD evidence and the verification mark. Actual SID or multiple-match conflicts cannot be bypassed by manual assignment.
 
-The optional current-name refresh follows the saved directory SID even if the account name/ID has changed. It updates the displayed name and Formerly known as label only; it preserves saved IDs, account names, backup metadata and folder names. It never switches to a different SID because its name looks familiar. Local restore recreation remains a separate, unimplemented migration operation.
+The optional current-name refresh follows the saved directory SID even if the account name/ID has changed. It updates displayed name and Formerly known as only, preserving saved metadata/folders. Native domain restore retains the saved SID. Local restore checks all target collisions, recreates accounts disabled with individual technician-entered passwords, maps only the original local name to the same destination name, and verifies final enabled/Administrators choices. Existing local accounts are never reused; no local-to-domain conversion exists.
 
 ## Metadata and folder labels
 
 New preparation folders use `backup.json` schema version **3**, with separate ID, ID attribute/source, Windows account name, UPN and source/directory SID fields. They remain `PreparedOnly`, with `HasMigrationData=false`.
+
+Native capture uses schema **4**, preserving those identity fields and adding source OS/architecture, tool/rule hashes, native results, capture state and store-verification evidence. Only CapturedVerified/CapturedWithWarnings with HasMigrationData=true restore; Capturing/CaptureFailed/CaptureCancelled remain blocked. EfsDecryptionVerified stays false without intended-user acceptance. Passwords and restore credential objects are never saved. Version-three PreparedOnly records remain readable and cannot restore.
 
 Versions 1 and 2 from earlier development tests are intentionally unsupported. Those folders remain visible as unrecognized; nothing is converted or deleted. Legacy-script USMT stores are not imported or recognized as usable backups by this change.
 

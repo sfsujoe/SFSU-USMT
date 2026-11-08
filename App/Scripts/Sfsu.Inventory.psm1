@@ -1,4 +1,4 @@
-# Windows PowerShell 5.1. Inventory and folder preparation only; no migration engine.
+# Windows PowerShell 5.1. Identity inventory and versioned backup metadata.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.DirectoryServices.Protocols
@@ -520,8 +520,24 @@ function Read-SfsuBackupManifest([string]$Path) {
     if ($stream.Length -gt 1MB) { $stream.Dispose(); throw 'Unsafe or oversized backup metadata.' }
     $reader=New-Object IO.StreamReader($stream)
     try { $data = ConvertFrom-Json ($reader.ReadToEnd()) -ErrorAction Stop } finally { $reader.Dispose() }
-    if ($data.SchemaVersion -ne 3 -or $data.Kind -ne 'SfsuUsmtBackup' -or $data.Status -ne 'PreparedOnly' -or $data.HasMigrationData -isnot [bool] -or $data.HasMigrationData -ne $false) {
+    if ($data.Kind -ne 'SfsuUsmtBackup' -or $data.HasMigrationData -isnot [bool] -or
+        ($data.SchemaVersion -eq 3 -and ($data.Status -ne 'PreparedOnly' -or $data.HasMigrationData)) -or
+        $data.SchemaVersion -notin @(3,4)) {
         throw 'Unrecognized backup metadata/version/status. Earlier development metadata is unsupported.'
+    }
+    if ($data.SchemaVersion -eq 4) {
+        if ($data.Status -notin @('Capturing','CaptureFailed','CaptureCancelled','CapturedVerified','CapturedWithWarnings') -or
+            $data.HasMigrationData -ne ($data.Status -in @('CapturedVerified','CapturedWithWarnings')) -or
+            $data.Engine.Store -cne 'Store' -or $data.Engine.SourceSid -cne $data.SourceProfile.Sid -or
+            $data.Engine.Architecture -notin @('amd64','arm64') -or $data.Engine.ToolVersion -notmatch '^\d+\.\d+\.\d+\.\d+$' -or
+            $data.Engine.EfsDecryptionVerified -isnot [bool] -or $data.Engine.EfsDecryptionVerified) { throw 'Invalid native-capture state/evidence.' }
+        if ($data.HasMigrationData) {
+            $names=@($data.Engine.PolicyFiles | ForEach-Object Name | Sort-Object -Unique)
+            if ($data.Engine.VerifyExitCode -isnot [int] -or $data.Engine.VerifyExitCode -ne 0 -or $data.Engine.CaptureExitCode -notin @(0,3) -or
+                $data.Engine.StoreLength -le 0 -or ($names -join '|') -cne 'Config.xml|MigApp.xml|MigDocs.xml|SfsuPolicy.xml' -or @($data.Engine.PolicyFiles).Count -ne 4 -or
+                $data.Engine.Policy.Efs -cne 'copyraw' -or $data.Engine.Policy.EncryptedStore -isnot [bool] -or $data.Engine.Policy.EncryptedStore) { throw 'Native store has no valid capture/verification/policy evidence.' }
+            foreach ($rule in $data.Engine.PolicyFiles) { if ($rule.Sha256 -notmatch '^[A-F0-9]{64}$') { throw 'Invalid native policy hash.' } }
+        }
     }
     $identity=$data.Identity | Select-Object *
     $identity | Add-Member NoteProperty IdentitySource $data.Identity.Source
@@ -554,7 +570,12 @@ function Get-SfsuBackupCatalog {
             $row.SfsuId = $manifest.Data.Identity.SfsuId; $row.DisplayName = $manifest.Data.Identity.DisplayName
             $row.SourceComputer = $manifest.Data.SourceComputer; $row.CreatedUtc = $manifest.Created
             $row.Timestamp = (Get-SfsuPacificTime $manifest.Created).ToString('yyyy-MM-dd HH:mm:ss zzz')
-            $row.Status = 'Prepared only - no data'; $row.IdentitySource = $manifest.Data.Identity.Source
+            $row.Status = 'Prepared only - no data'
+            if ($manifest.Data.SchemaVersion -eq 4) {
+                $labels=@{Capturing='Incomplete capture';CaptureFailed='Capture failed';CaptureCancelled='Capture cancelled';CapturedVerified='Captured - store verified';CapturedWithWarnings='Captured - review warnings'}
+                $row.Status=$labels[[string]$manifest.Data.Status]
+            }
+            $row.IdentitySource = $manifest.Data.Identity.Source
             $row.DirectorySid = $manifest.Data.Identity.DirectorySid; $row.MetadataValid = $true
         } catch { $row.Status = 'Unreadable / unrecognized metadata' }
         [pscustomobject]$row
@@ -591,7 +612,7 @@ function Invoke-SfsuBackupInventory {
             Write-SfsuLogEvent -Run $run -StepId list -Severity $severity -Message ($backup.Path + ': ' + $backup.Status)
         }
         Complete-SfsuLogStep -Run $run -StepId list -Status Passed -Message ("Read $($backups.Count) backup directories; sorted by saved capture/preparation time, newest first.")
-        Complete-SfsuLogRun -Run $run -Outcome Completed -Message 'Backup listing completed. Prepared folders contain no migration data.' | Out-Null
+        Complete-SfsuLogRun -Run $run -Outcome Completed -Message 'Backup listing completed. Only verified native captures can restore; prepared/incomplete folders contain no accepted migration data.' | Out-Null
         [pscustomobject]@{ Backups=$backups; DirectoryStatus=$directoryStatus; ReportPath=$run.ReportPath; RunDirectory=$run.RunDirectory }
     } catch {
         Write-SfsuLogEvent -Run $run -Severity ERROR -Message 'Backup listing failed.' -Details $_.Exception.Message
@@ -603,7 +624,7 @@ function Invoke-SfsuBackupInventory {
 function Invoke-SfsuRestoreReview {
     param([string]$PackageRoot, [object[]]$Backups)
     if (@($Backups).Count -eq 0) { throw 'Select at least one backup.' }
-    $run = New-SfsuLogRun -PackageRoot $PackageRoot -Operation RestoreReview -Steps @(@{Id='review';Title='Review selected backup metadata'}) -Label 'Selection review only. Restore is not connected.'
+    $run = New-SfsuLogRun -PackageRoot $PackageRoot -Operation RestoreReview -Steps @(@{Id='review';Title='Review selected backup metadata'}) -Label 'Metadata review only. This action does not run restore.'
     Start-SfsuLogStep -Run $run -StepId review
     $root = [IO.Path]::GetFullPath((Join-Path $PackageRoot 'Backups')).TrimEnd('\')
     foreach ($backup in $Backups) {
@@ -611,7 +632,8 @@ function Invoke-SfsuRestoreReview {
             $path = [IO.Path]::GetFullPath($backup.Path)
             if ([IO.Path]::GetDirectoryName($path) -ne $root) { throw 'Selected folder is outside this package Backups directory.' }
             $manifest = Read-SfsuBackupManifest $path
-            Write-SfsuCheckpoint -Run $run -StepId review -Status Warning -Message ($path + ': metadata reviewed. Prepared only; no migration data exists to restore.') -NextAction 'A real capture and verified store will be required before restore integration.'
+            if ($manifest.Data.HasMigrationData) { Write-SfsuCheckpoint -Run $run -StepId review -Status Passed -Message ($path+': native-capture metadata reviewed. Destination collision checks and fresh store verification are required before restore.') }
+            else { Write-SfsuCheckpoint -Run $run -StepId review -Status Warning -Message ($path + ': metadata reviewed. Prepared only; no migration data exists to restore.') -NextAction 'Perform a successful native capture before restoring this identity.' }
         } catch {
             Write-SfsuLogEvent -Run $run -StepId review -Severity ERROR -Message ('Cannot review ' + $backup.Path) -Details $_.Exception.Message
         }
@@ -623,4 +645,5 @@ function Invoke-SfsuRestoreReview {
 
 Export-ModuleMember -Function Get-SfsuProfiles, Get-SfsuDomainProfiles, Set-SfsuManualIdentity, Invoke-SfsuProfileDiscovery,
     Invoke-SfsuBackupPreparation, Get-SfsuBackupCatalog, Invoke-SfsuBackupInventory, Invoke-SfsuRestoreReview,
-    ConvertTo-SfsuLogin, Invoke-SfsuDirectoryAuthentication, Test-SfsuProfileVerified, Test-SfsuIdentityText
+    ConvertTo-SfsuLogin, Invoke-SfsuDirectoryAuthentication, Test-SfsuProfileVerified, Test-SfsuIdentityText,
+    New-SfsuPreparedBackup,Read-SfsuBackupManifest,Assert-SfsuIdentityEvidence

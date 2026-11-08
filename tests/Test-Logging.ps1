@@ -167,7 +167,7 @@ foreach ($scenario in @('Warnings','Failed','Cancelled','Incomplete')) {
 }
 
 # Parse all shipped PowerShell sources under the actual 5.1 parser.
-foreach ($source in Get-ChildItem -LiteralPath (Join-Path $repository 'App/Scripts') -File) {
+foreach ($source in Get-ChildItem -LiteralPath (Join-Path $repository 'App/Scripts') -File | Where-Object Extension -in @('.ps1','.psm1','.psd1')) {
     $tokens = $null; $parseErrors = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile($source.FullName, [ref]$tokens, [ref]$parseErrors)
     Assert-True ($parseErrors.Count -eq 0) ('PowerShell syntax: ' + $source.Name)

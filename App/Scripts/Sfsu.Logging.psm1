@@ -55,6 +55,17 @@ namespace Sfsu {
    try { Check(handle,false); return new FileStream(handle,write ? FileAccess.ReadWrite : FileAccess.Read); }
    catch { handle.Dispose(); throw; }
   }
+  public static void InspectLiveFile(string path) {
+   // A report link needs metadata, not file contents. Zero requested access and
+   // full sharing coexist even with an exclusive native writer. Keep no-follow
+   // and single-link checks; do not relax the protected write/store open above.
+   using(var handle=CreateFile(Path.GetFullPath(path),0,7,IntPtr.Zero,3,0x00200000,IntPtr.Zero)) { Check(handle,false); }
+  }
+  public static FileStream OpenSharedRead(string path) {
+   var handle=CreateFile(Path.GetFullPath(path),0x80000000,7,IntPtr.Zero,3,0x00200000,IntPtr.Zero);
+   try { Check(handle,false); return new FileStream(handle,FileAccess.Read); }
+   catch { handle.Dispose(); throw; }
+  }
  }
 }
 '@
@@ -75,6 +86,14 @@ function Assert-SfsuSafePath([string]$Path,[switch]$AllowMissing) {
             if (-not $item.PSIsContainer) { $stream=[Sfsu.SafeFiles]::Open($full,$false,$false); $stream.Dispose() }
         } elseif (-not $AllowMissing) { throw 'The required path does not exist.' }
         $full
+    } finally { $guard.Dispose() }
+}
+
+function Assert-SfsuRawLogMetadata([string]$Path) {
+    $guard=Enter-SfsuPathGuard $Path
+    try {
+        try { [Sfsu.SafeFiles]::InspectLiveFile($Path) }
+        catch { throw [IO.IOException]::new(('Cannot inspect raw log "'+$Path+'": '+$_.Exception.Message),$_.Exception) }
     } finally { $guard.Dispose() }
 }
 
@@ -499,13 +518,17 @@ function Update-SfsuLogReport {
         [void]$rows.Append('<tr data-severity="' + (ConvertTo-SfsuHtml $event.Severity) + '"><td>' + $event.Sequence + '</td><td class="time" data-sort="' + $utcTime.ToUnixTimeMilliseconds() + '">' + $time + '</td><td>' + (ConvertTo-SfsuHtml $title) + '</td><td class="severity">' + $severityText + '</td><td>' + $message + $details + '</td><td>' + (ConvertTo-SfsuHtml $event.NextAction) + '</td></tr>')
     }
     $rawLinks = New-Object System.Text.StringBuilder
+    $rawProblems=New-Object Collections.Generic.List[string]
     # Discover raw files as well as registered events: interrupted engines may leave unregistered logs.
     foreach ($file in @(Get-ChildItem -LiteralPath $run.RawDirectory -File | Sort-Object Name)) {
-        [void](Assert-SfsuSafePath $file.FullName)
-        [void]$rawLinks.Append('<li><a href="Raw/' + [Uri]::EscapeDataString($file.Name) + '">' + (ConvertTo-SfsuHtml $file.Name) + '</a></li>')
+        try {
+            Assert-SfsuRawLogMetadata $file.FullName
+            [void]$rawLinks.Append('<li><a href="Raw/' + [Uri]::EscapeDataString($file.Name) + '">' + (ConvertTo-SfsuHtml $file.Name) + '</a></li>')
+        } catch { $rawProblems.Add($_.Exception.Message) }
     }
     if ($rawLinks.Length -eq 0) { [void]$rawLinks.Append('<li>No original USMT logs have been recorded.</li>') }
     $notice = ''
+    if ($rawProblems.Count -gt 0) { $notice+='<div class="alert">! WARNING: Some raw-log links could not be safely inspected and were omitted. '+(ConvertTo-SfsuHtml ($rawProblems -join '; '))+'</div>' }
     if ($header.Sample) { $notice = '<div class="sample">SAMPLE REPORT &mdash; simulated events only. No migration, store verification, or restore test was performed.</div>' }
     if ($journal.InvalidLines -gt 0) { $notice += '<div class="alert">! ERROR: The event journal contains unreadable or out-of-sequence records. Result is Incomplete. Preserve the original journal.</div>' }
     $snapshotError = Join-Path $run.RunDirectory 'snapshot-error.txt'
@@ -584,6 +607,6 @@ function Export-SfsuLogSnapshot {
     } finally { if ($destinationGuard) { $destinationGuard.Dispose() }; $sourceGuard.Dispose() }
 }
 
-Export-ModuleMember -Function New-SfsuLogRun, Start-SfsuLogStep, Write-SfsuLogEvent, Write-SfsuCheckpoint,
+Export-ModuleMember -Function Write-SfsuAtomicText,New-SfsuLogRun, Start-SfsuLogStep, Write-SfsuLogEvent, Write-SfsuCheckpoint,
     Complete-SfsuLogStep, Complete-SfsuLogRun, Get-SfsuRawLogPath, Add-SfsuRawLog, Update-SfsuLogReport, Export-SfsuLogSnapshot,
     Assert-SfsuSafePath, Enter-SfsuPathGuard

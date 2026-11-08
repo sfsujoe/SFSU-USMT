@@ -1,6 +1,8 @@
 # Loaded by Start-SfsuUsmt.ps1. UI tasks run in a separate PowerShell runspace.
 Import-Module (Join-Path $PSScriptRoot 'Sfsu.Inventory.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Sfsu.Appearance.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Sfsu.Engine.psm1') -Force
+. (Join-Path $PSScriptRoot 'Sfsu.Migration.Ui.ps1')
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
@@ -9,7 +11,7 @@ $script:SfsuUi = @{ Root=$packageRoot; Worker=$null; Pending=$null; Credential=$
     DirectoryLastUsedUtc=[DateTime]::MinValue; CredentialIdleMinutes=10
     ThemeId=$appearancePreference.ThemeId; TextScale=$appearancePreference.TextScale; PreferenceWarning=$appearancePreference.Warning; PreviewTheme=''; PreviewTextScale=0; Palette=$null; AppearanceSignature=''
     Dialogs=(New-Object 'Collections.Generic.List[Windows.Forms.Form]'); GridFontScale=0
-    MainLayout=[pscustomobject]@{Interactive=$false;Busy=$false;Signature=''} }
+    MainLayout=[pscustomobject]@{Interactive=$false;Busy=$false;Signature=''}; MigrationControl=$null; ActiveRestorePlans=@() }
 
 function Update-SfsuAppearance {
     param($Palette=$null)
@@ -262,22 +264,27 @@ function Start-SfsuUiTask([string]$Action, [object[]]$Items=@()) {
     $script:SfsuUi.Tabs.Enabled=$false; $script:SfsuUi.Cancel.Enabled=$true; $script:SfsuUi.Cancelled=$false
     $script:SfsuUi.Status.Text='Working: ' + $Action + '. You can cancel; interrupted work remains documented as incomplete.'
     $script:SfsuUi.Action=$Action
+    $script:SfsuUi.MigrationControl=[hashtable]::Synchronized(@{CancelRequested=$false;Message='';Percent=-1})
     if ($script:SfsuUi.UseDirectory -and $Action -in @('Discover profiles','Refresh current names')) { $script:SfsuUi.DirectoryLastUsedUtc=[DateTime]::UtcNow }
     $worker=[PowerShell]::Create()
     $task={
-        param($root,$action,$items,$credential,$server,$useDirectory)
+        param($root,$action,$items,$credential,$server,$useDirectory,$control)
         $ErrorActionPreference='Stop'
         Import-Module (Join-Path $root 'App/Scripts/Sfsu.Logging.psm1') -Force
         Import-Module (Join-Path $root 'App/Scripts/Sfsu.Inventory.psm1') -Force
+        if ($action -in @('Review capture locations','Capture profiles','Review restore selection','Restore backups')) { Import-Module (Join-Path $root 'App/Scripts/Sfsu.Engine.psm1') -Force }
         switch ($action) {
             'Discover profiles' { Invoke-SfsuProfileDiscovery -PackageRoot $root -Server $server -Credential $credential -SkipDirectoryLookup:(-not $useDirectory) }
             'Prepare folders' { Invoke-SfsuBackupPreparation -PackageRoot $root -Profiles $items }
             'List backups' { Invoke-SfsuBackupInventory -PackageRoot $root }
             'Refresh current names' { Invoke-SfsuBackupInventory -PackageRoot $root -LookupNames -Server $server -Credential $credential }
-            'Review restore selection' { Invoke-SfsuRestoreReview -PackageRoot $root -Backups $items }
+            'Review capture locations' { Invoke-SfsuCaptureReview -PackageRoot $root -Profiles $items }
+            'Capture profiles' { Invoke-SfsuCapture -PackageRoot $root -Reviews $items -Control $control }
+            'Review restore selection' { Invoke-SfsuRestorePlanning -PackageRoot $root -Backups $items }
+            'Restore backups' { Invoke-SfsuRestore -PackageRoot $root -Backups $items -Control $control }
         }
     }
-    [void]$worker.AddScript($task.ToString()).AddArgument($script:SfsuUi.Root).AddArgument($Action).AddArgument($Items).AddArgument($script:SfsuUi.Credential).AddArgument($LdapServer).AddArgument($script:SfsuUi.UseDirectory)
+    [void]$worker.AddScript($task.ToString()).AddArgument($script:SfsuUi.Root).AddArgument($Action).AddArgument($Items).AddArgument($script:SfsuUi.Credential).AddArgument($LdapServer).AddArgument($script:SfsuUi.UseDirectory).AddArgument($script:SfsuUi.MigrationControl)
     $script:SfsuUi.Worker=$worker
     try { $script:SfsuUi.Pending=$worker.BeginInvoke(); $script:SfsuUi.Timer.Start() }
     catch { $worker.Dispose(); $script:SfsuUi.Worker=$null; $script:SfsuUi.Tabs.Enabled=$true; $script:SfsuUi.Cancel.Enabled=$false; throw }
@@ -490,7 +497,7 @@ $subtitle.Add_LinkClicked({
     catch { Show-SfsuMessage 'The Academic Technology website could not be opened. Visit https://at.sfsu.edu/ in your browser.' }
 })
 $notice=New-Object Windows.Forms.Label; $notice.Name='ThemeNotice'; $notice.Dock='Top'; $notice.AutoSize=$false; $notice.Padding=New-Object Windows.Forms.Padding(18,10,18,10)
-$notice.Text='Preparation test: reads profiles and directory identities, creates folders and metadata. No employee files are copied and no restore runs.'
+$notice.Text='Back up selected profiles or restore verified backups. Cloud folders are excluded; cloud uploads are assumed complete. Review the final report before retiring the source computer.'
 $notice.BackColor=[Drawing.ColorTranslator]::FromHtml('#FFF6DF')
 $footer=New-Object Windows.Forms.TableLayoutPanel; $footer.Name='ThemeFooter'; $footer.Dock='Bottom'; $footer.AutoSize=$true; $footer.Padding=New-Object Windows.Forms.Padding(12,8,12,8)
 $footer.ColumnCount=2; $footer.RowCount=2
@@ -501,6 +508,8 @@ $footer.SetColumnSpan($footerActions,2)
 $open=New-SfsuButton $footerActions 'Open latest report' 18 180; $open.Enabled=$false
 $logs=New-SfsuButton $footerActions 'Open Logs folder' 212 170
 $cancelTask=New-SfsuButton $footerActions 'Cancel task' 396 135; $cancelTask.Enabled=$false
+$migrationProgress=New-Object Windows.Forms.ProgressBar; $migrationProgress.Width=180; $migrationProgress.Height=24; $migrationProgress.Visible=$false; $migrationProgress.AccessibleName='Progress of the current native migration command'; $footerActions.Controls.Add($migrationProgress)
+$script:SfsuUi.MigrationProgress=$migrationProgress
 $chooseTheme=New-SfsuButton $footer 'Theme & Font' 0 160; $chooseTheme.UseMnemonic=$false; $chooseTheme.Name='ChooseTheme'; $chooseTheme.Anchor='Bottom,Right'; $footer.SetCellPosition($chooseTheme,(New-Object Windows.Forms.TableLayoutPanelCellPosition(1,1)))
 $chooseTheme.AccessibleDescription='Alt+T. Choose and save the shared toolkit appearance.'
 $status=New-Object Windows.Forms.Label; $status.Dock='Fill'; $status.AutoSize=$true; $status.MinimumSize=New-Object Drawing.Size(0,44); $status.Text='Ready.'; $footer.Controls.Add($status,0,1)
@@ -516,7 +525,7 @@ $backupBar=New-Object Windows.Forms.FlowLayoutPanel; $backupBar.Dock='Top'; $bac
 $refresh=New-SfsuButton $backupBar 'Refresh profiles' 12 150
 $credentials=New-SfsuButton $backupBar 'Directory credentials...' 174 200
 $manual=New-SfsuButton $backupBar 'Assign Display Name' 386 230
-$prepare=New-SfsuButton $backupBar 'Prepare selected folders' 628 250
+$prepare=New-SfsuButton $backupBar 'Back up selected profiles' 628 250
 $prepare.Name='PrimaryAction'
 $all=New-SfsuButton $backupBar 'Select all' 12 110 53
 $none=New-SfsuButton $backupBar 'Select none' 134 120 53
@@ -537,7 +546,7 @@ $restoreBar=New-Object Windows.Forms.FlowLayoutPanel; $restoreBar.Dock='Top'; $r
 $refreshBackups=New-SfsuButton $restoreBar 'Refresh backups' 12 155
 $currentNames=New-SfsuButton $restoreBar 'Refresh current names' 179 205
 $restoreCredentials=New-SfsuButton $restoreBar 'Directory credentials...' 396 205
-$review=New-SfsuButton $restoreBar 'Review selected backups' 613 260
+$review=New-SfsuButton $restoreBar 'Restore selected backups' 613 260
 $review.Name='PrimaryAction'
 $backups=New-SfsuGrid $restorePage @(
     @{Id='Selected';Title='Select';Weight=6}, @{Id='SfsuId';Title='SFSU ID';Weight=11}, @{Id='AccountName';Title='Account';Weight=14}, @{Id='DisplayName';Title='Name';Weight=18},
@@ -689,17 +698,17 @@ $all.Add_Click({ foreach ($row in $script:SfsuUi.Profiles.Rows) { $row.Cells['Se
 $none.Add_Click({ foreach ($row in $script:SfsuUi.Profiles.Rows) { $row.Cells['Selected'].Value=$false } })
 $prepare.Add_Click({
     $items=@(Get-SfsuCheckedRows $script:SfsuUi.Profiles)
-    if ($items.Count -eq 0) { Show-SfsuMessage 'Check at least one profile to prepare.'; return }
+    if ($items.Count -eq 0) { Show-SfsuMessage 'Check at least one profile to back up.'; return }
     if (@($items | Where-Object { [string]::IsNullOrWhiteSpace($_.DisplayName) -or $_.IdentitySource -notin @('LDAP','Manual') -or ($_.IdentitySource -eq 'Manual' -and -not $_.ManualConfirmed) }).Count -gt 0) {
         Show-SfsuMessage 'Resolve or explicitly confirm a manual identity for every checked profile first.'; return
     }
-    Start-SfsuUiTask 'Prepare folders' $items
+    Start-SfsuUiTask 'Review capture locations' $items
 })
 $refreshBackups.Add_Click({ Start-SfsuUiTask 'List backups' })
 $currentNames.Add_Click({ Start-SfsuUiTask 'Refresh current names' })
 $review.Add_Click({
     $items=@(Get-SfsuCheckedRows $script:SfsuUi.Backups)
-    if ($items.Count -eq 0) { Show-SfsuMessage 'Check at least one backup to review.'; return }
+    if ($items.Count -eq 0) { Show-SfsuMessage 'Check at least one verified backup to restore.'; return }
     Start-SfsuUiTask 'Review restore selection' $items
 })
 $tabs.Add_SelectedIndexChanged({ if ($script:SfsuUi.Tabs.SelectedIndex -eq 1) { Start-SfsuUiTask 'List backups' } })
@@ -711,13 +720,25 @@ $logs.Add_Click({
 $cancelTask.Add_Click({
     if ($null -ne $script:SfsuUi.Worker) {
         $script:SfsuUi.Cancelled=$true; $script:SfsuUi.Cancel.Enabled=$false; $script:SfsuUi.Status.Text='Stopping. Any unfinished run remains Incomplete; existing files are preserved.'
-        [void]$script:SfsuUi.Worker.BeginStop($null,$null)
+        if ($script:SfsuUi.Action -in @('Capture profiles','Restore backups')) { $script:SfsuUi.MigrationControl.CancelRequested=$true }
+        else { [void]$script:SfsuUi.Worker.BeginStop($null,$null) }
     }
 })
 $timer=New-Object Windows.Forms.Timer; $timer.Interval=150; $script:SfsuUi.Timer=$timer
 $timer.Add_Tick({
-    if ($null -eq $script:SfsuUi.Pending -or -not $script:SfsuUi.Pending.IsCompleted) { return }
+    if ($null -eq $script:SfsuUi.Pending) { return }
+    if (-not $script:SfsuUi.Pending.IsCompleted) {
+        $control=$script:SfsuUi.MigrationControl
+        if ($control -and $control.Message -and -not $script:SfsuUi.Cancelled) {
+            $script:SfsuUi.Status.Text=$control.Message
+            $script:SfsuUi.MigrationProgress.Visible=$true
+            if ($control.Percent -ge 0) { $script:SfsuUi.MigrationProgress.Style='Continuous'; $script:SfsuUi.MigrationProgress.Value=$control.Percent; $script:SfsuUi.Status.Text+=': '+$control.Percent+'%' }
+            else { $script:SfsuUi.MigrationProgress.Style='Marquee' }
+        }
+        return
+    }
     $script:SfsuUi.Timer.Stop()
+    $nextReviews=$null; $nextPlans=$null
     try {
         $output=@($script:SfsuUi.Worker.EndInvoke($script:SfsuUi.Pending))
         if ($script:SfsuUi.Worker.HadErrors) { throw [string]$script:SfsuUi.Worker.Streams.Error[0] }
@@ -725,17 +746,20 @@ $timer.Add_Tick({
         $result=$output[-1]
         $script:SfsuUi.LatestReport=$result.ReportPath; $script:SfsuUi.Open.Enabled=$true
         switch ($script:SfsuUi.Action) {
-            'Discover profiles' { Set-SfsuProfileRows @($result.Profiles); $script:SfsuUi.Status.Text="$(@($result.Profiles).Count) domain/local profile directories. Directory: $($result.DirectoryStatus). Check identities before preparation." }
+            'Discover profiles' { Set-SfsuProfileRows @($result.Profiles); $script:SfsuUi.Status.Text="$(@($result.Profiles).Count) domain/local profile directories. Directory: $($result.DirectoryStatus). Check identities before backup." }
             'Prepare folders' {
                 $script:SfsuUi.Status.Text="$(@($result.Paths).Count) folders prepared; $(@($result.Errors).Count) errors. No employee data captured. See the report for details."
             }
-            'List backups' { Set-SfsuBackupRows @($result.Backups); $script:SfsuUi.Status.Text="$(@($result.Backups).Count) backup folders listed, newest first. Prepared folders contain no migration data." }
+            'List backups' { Set-SfsuBackupRows @($result.Backups); $script:SfsuUi.Status.Text="$(@($result.Backups).Count) backup folders listed, newest first. Only verified native captures can restore." }
             'Refresh current names' { Set-SfsuBackupRows @($result.Backups); $script:SfsuUi.Status.Text="Current-name lookup: $($result.DirectoryStatus). Historical metadata was preserved." }
-            'Review restore selection' { $script:SfsuUi.Status.Text='Selection review finished. No restore ran. Read the report for individual results.' }
+            'Review capture locations' { $nextReviews=@($result.Reviews) }
+            'Review restore selection' { $nextPlans=@($result.Plans) }
+            'Capture profiles' { $script:SfsuUi.Status.Text='Capture '+$result.Outcome.Replace('CompletedWithWarnings','completed with warnings').ToLowerInvariant()+'. Review native warnings and store verification in the report before retiring the source.' }
+            'Restore backups' { $script:SfsuUi.Status.Text='Restore '+$result.Outcome.Replace('CompletedWithWarnings','completed with warnings').ToLowerInvariant()+'. Review the report and validate sign-in, applications and EFS files as the restored user.' }
         }
     } catch {
         $script:SfsuUi.Status.Text='Task stopped: ' + $_.Exception.Message
-        if ($script:SfsuUi.Cancelled) { $script:SfsuUi.Status.Text='Task cancelled. Review the latest report; unfinished work remains Incomplete. No migration ran.' }
+        if ($script:SfsuUi.Cancelled) { $script:SfsuUi.Status.Text='Task cancelled. Review the latest report; unfinished stores/accounts/data were preserved.' }
         $logRoot=Join-Path $script:SfsuUi.Root 'Logs'
         if (Test-Path -LiteralPath $logRoot) {
             $latest=Get-ChildItem -LiteralPath $logRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
@@ -746,8 +770,16 @@ $timer.Add_Tick({
     } finally {
         if ($script:SfsuUi.UseDirectory -and $script:SfsuUi.Action -in @('Discover profiles','Refresh current names')) { $script:SfsuUi.DirectoryLastUsedUtc=[DateTime]::UtcNow }
         $script:SfsuUi.Worker.Dispose(); $script:SfsuUi.Worker=$null; $script:SfsuUi.Pending=$null
+        if ($script:SfsuUi.Action -eq 'Restore backups') { Clear-SfsuRestorePasswords $script:SfsuUi.ActiveRestorePlans; $script:SfsuUi.ActiveRestorePlans=@() }
+        $script:SfsuUi.MigrationProgress.Visible=$false
         $script:SfsuUi.Tabs.Enabled=$true; $script:SfsuUi.Cancel.Enabled=$false
         if ($script:SfsuUi.CloseWhenDone) { $script:SfsuUi.Form.Close() }
+    }
+    if (-not $script:SfsuUi.CloseWhenDone -and -not $script:SfsuUi.Cancelled) {
+        try {
+            if ($null -ne $nextReviews) { Show-SfsuCaptureLocations $nextReviews }
+            elseif ($null -ne $nextPlans) { Show-SfsuRestoreSettings $nextPlans }
+        } catch { $script:SfsuUi.Status.Text='Could not start the operation: '+$_.Exception.Message }
     }
 })
 $form.Add_FormClosing({
@@ -759,6 +791,7 @@ $form.Add_FormClosing({
 })
 if (-not $BuildUiOnly) { $form.WindowState='Maximized'; $form.Add_Shown({ Show-SfsuDirectoryCredentials }) }
 $form.Add_Disposed({
+    Clear-SfsuRestorePasswords $script:SfsuUi.ActiveRestorePlans
     $script:SfsuUi.Timer.Dispose()
     $script:SfsuUi.AppearanceTimer.Stop(); $script:SfsuUi.AppearanceTimer.Dispose()
     if ($null -ne $script:SfsuUi.Credential) { $script:SfsuUi.Credential.Password.Dispose(); $script:SfsuUi.Credential=$null }

@@ -69,6 +69,7 @@ $messageProbe=@'
     [IO.File]::Move(($path+'.tmp'),$path)
 '@
 [IO.File]::WriteAllText($entryPath,$entry.Replace($messageCall,$messageProbe))
+[IO.File]::WriteAllText((Join-Path $testRoot 'App/Scripts/Sfsu.Launch.psm1'),'function Test-SfsuAdministrator { $true }')
 [IO.File]::WriteAllText((Join-Path $testRoot 'App/Scripts/Sfsu.Logging.psm1'),"throw 'Synthetic startup import failure.'")
 $launched=Invoke-Launcher
 Assert-True ($launched.ExitCode -eq 0) 'The normal launcher returns after starting its hidden app process.'
@@ -83,6 +84,7 @@ Assert-True (-not (Test-Path -LiteralPath (Join-Path $testRoot 'error-probe.json
 # A file blocking Logs must still produce an actionable graphical error.
 $blockedRoot=Join-Path $testRoot 'blocked'; [void][IO.Directory]::CreateDirectory((Join-Path $blockedRoot 'App/Scripts'))
 [IO.File]::WriteAllText((Join-Path $blockedRoot 'App/Scripts/Start-SfsuUsmt.ps1'),$entry.Replace($messageCall,$messageProbe))
+[IO.File]::WriteAllText((Join-Path $blockedRoot 'App/Scripts/Sfsu.Launch.psm1'),'function Test-SfsuAdministrator { $true }')
 [IO.File]::WriteAllText((Join-Path $blockedRoot 'App/Scripts/Sfsu.Logging.psm1'),"throw 'Synthetic startup import failure.'")
 [IO.File]::WriteAllText((Join-Path $blockedRoot 'Logs'),'Synthetic obstruction.')
 Copy-Item -LiteralPath (Join-Path $repository 'sfsu-usmt.cmd') -Destination $blockedRoot

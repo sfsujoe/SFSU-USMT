@@ -1,7 +1,8 @@
 @echo off
 setlocal
-rem Profile discovery and folder preparation only. USMT is not connected.
-rem Bypass is limited to this PowerShell process; this launcher does not auto-elevate.
+rem Native USMT capture/restore GUI. Keep the complete App folder beside this file.
+rem GUI startup requests administrator approval before sign-in when needed.
+rem Bypass is process-only. Headless/developer/maintenance actions do not auto-elevate.
 rem Normal launch shows the existing application/sign-in form without a persistent console.
 rem Argument-based diagnostic commands remain synchronous and visible.
 if not "%~1"=="" goto commandline

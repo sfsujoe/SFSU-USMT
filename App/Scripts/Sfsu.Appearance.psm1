@@ -214,6 +214,7 @@ function Update-SfsuDialogLayout($Form,[switch]$Force) {
                 $size=[Windows.Forms.TextRenderer]::MeasureText($c.Text,$c.Font,(New-Object Drawing.Size($width,0)),[Windows.Forms.TextFormatFlags]::WordBreak)
                 $height=[Math]::Max([int]($row.Lines*$c.Font.Height),$size.Height+4)
             } elseif ($row.Kind -eq 'Preview') { $height=$Form.Font.Height*3+12 }
+            elseif ($row.Kind -eq 'TextArea') { $height=$Form.Font.Height*$row.Lines+16 }
             elseif ($c -is [Windows.Forms.CheckBox]) {
                 $size=[Windows.Forms.TextRenderer]::MeasureText($c.Text,$c.Font,(New-Object Drawing.Size(($width-32),0)),[Windows.Forms.TextFormatFlags]::WordBreak)
                 $height=[Math]::Max([int](30*$scale),$size.Height+8)

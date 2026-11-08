@@ -20,9 +20,10 @@ $packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $script:CurrentRun = $null
 $guiRequested = -not ($Headless -or $DiscoverProfiles -or $RebuildReport -or $BuildUiOnly -or $ReviewStorageAccess -or $PreviewLogRetention -or $ApplyLogRetention -or $SnapshotBackupPath)
 
-function Show-SfsuStartupError([string]$DetailsPath) {
+function Show-SfsuStartupError([string]$DetailsPath,[string]$Reason='') {
     Add-Type -AssemblyName System.Windows.Forms
     $message='SFSU USMT could not start.'
+    if ($Reason) { $message+="`r`n`r`n"+$Reason }
     if ($DetailsPath) { $message+="`r`n`r`nStartup details: "+$DetailsPath }
     else { $message+="`r`n`r`nStartup details could not be saved. Check access to the toolkit folder, or run the PowerShell entry script from a console to view the error." }
     [void][Windows.Forms.MessageBox]::Show($message,'SFSU USMT startup error',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)
@@ -91,7 +92,19 @@ function New-SfsuSampleReport {
     }
 }
 
+$elevationPending=$guiRequested
 try {
+    if ($guiRequested) {
+        Import-Module (Join-Path $PSScriptRoot 'Sfsu.Launch.psm1') -Force
+        if (-not (Test-SfsuAdministrator)) {
+            $elevatedExit=Start-SfsuElevatedGui -EntryPath $PSCommandPath -LdapServer $LdapServer -Scenario $Scenario
+            if ($elevatedExit -ne 0) {
+                throw "The elevated app exited with code $elevatedExit. Check that the administrator account can read the toolkit and access its Logs and Backups folders. Run the entry script from an elevated console for startup or policy diagnostics."
+            }
+            exit 0
+        }
+    }
+    $elevationPending=$false
     Import-Module (Join-Path $PSScriptRoot 'Sfsu.Logging.psm1') -Force
     if ($ReviewStorageAccess -or $PreviewLogRetention -or $ApplyLogRetention) {
         if ($DiscoverProfiles -or $Headless -or $RebuildReport -or $BuildUiOnly -or $DirectoryCredential -or $SnapshotBackupPath) { throw 'Run package maintenance separately from application actions.' }
@@ -121,6 +134,7 @@ try {
 } catch {
     # Startup may fail before the reporting module is available. Keep a plain-text fallback.
     $failureText = $_.Exception.ToString()
+    $failureMessage = $_.Exception.Message
     $failurePath = ''
     try {
         $logsPath = Join-Path $packageRoot 'Logs'
@@ -132,7 +146,10 @@ try {
     } catch { $failurePath=''; [Console]::Error.WriteLine('The Logs folder is not writable. Save the error shown below.') }
     [Console]::Error.WriteLine($failureText)
     if ($guiRequested) {
-        try { Show-SfsuStartupError -DetailsPath $failurePath }
+        try {
+            $reason=if ($elevationPending) { $failureMessage } else { '' }
+            Show-SfsuStartupError -DetailsPath $failurePath -Reason $reason
+        }
         catch { [Console]::Error.WriteLine('Could not display the startup error dialog.') }
     }
     exit 1

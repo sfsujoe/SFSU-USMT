@@ -12,18 +12,18 @@ function Assert-True([bool]$Condition,[string]$Message) {
 function Assert-Throws([scriptblock]$Action,[string]$Message) {
     $caught=$false; try { & $Action | Out-Null } catch { $caught=$true }; Assert-True $caught $Message
 }
-foreach ($source in Get-ChildItem -LiteralPath (Join-Path $repository 'App/Scripts') -File) {
+foreach ($source in Get-ChildItem -LiteralPath (Join-Path $repository 'App/Scripts') -File | Where-Object Extension -in @('.ps1','.psm1','.psd1')) {
     $tokens=$null; $problems=$null
     [void][Management.Automation.Language.Parser]::ParseFile($source.FullName,[ref]$tokens,[ref]$problems)
     if ($problems.Count) { throw ($source.Name+': '+($problems.Message -join '; ')) }
     Assert-True ($problems.Count -eq 0) ('Windows PowerShell parser: '+$source.Name)
 }
-$engineCalls=@(Get-ChildItem -LiteralPath (Join-Path $repository 'App/Scripts') -File | ForEach-Object {
+$engineCalls=@(Get-ChildItem -LiteralPath (Join-Path $repository 'App/Scripts') -Filter Sfsu.Inventory.psm1 -File | ForEach-Object {
     $tokens=$null; $problems=$null
     $tree=[Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$problems)
     $tree.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -match '(?i)(scanstate|loadstate|usmtutils)(\.exe)?$'},$true)
 })
-Assert-True ($engineCalls.Count -eq 0) 'No shipped script calls the USMT executables.'
+Assert-True ($engineCalls.Count -eq 0) 'Inventory/preparation does not directly launch USMT; migration uses the supervised engine adapter.'
 $testRoot=Join-Path $PSScriptRoot ('.work/inventory-'+[guid]::NewGuid().ToString('N').Substring(0,8))
 [void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'App/Scripts'))
 [void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'App/Reporting'))
