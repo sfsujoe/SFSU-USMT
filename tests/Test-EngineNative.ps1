@@ -44,7 +44,7 @@ Assert-True ([Sfsu.Engine.Locations]::FreeBytes($root) -gt 0) 'Native free-space
 Assert-True ([Sfsu.Engine.Locations]::FinalDirectory($root).TrimEnd('\') -ieq $root.TrimEnd('\')) 'Final-directory resolution preserves the literal local fixture path.'
 $progress=Join-Path $root 'progress.log'; $log=Join-Path $root 'native.log'
 [IO.File]::WriteAllText($progress,"date,time,duration,totalPercentageCompleted,42`r`nnonFatalError,5`r`n",[Text.Encoding]::Unicode)
-[IO.File]::WriteAllText($log,'Error MIG synthetic failure detail')
+[IO.File]::WriteAllText($log,'2026-11-24 10:00:00, Error [0x000005] MIG synthetic failure detail')
 $diagnostics=& $module { param($log,$progress) Get-SfsuNativeDiagnostics $log $progress 0 } $log $progress
 Assert-True ($diagnostics.HasWarnings -and $diagnostics.ErrorLines -eq 1 -and $diagnostics.NonFatalRecords -eq 1) 'Native diagnostics retain error/nonfatal evidence even when the executable returns zero.'
 $tail=& $module { param($path) Read-SfsuNativeTail $path } $progress

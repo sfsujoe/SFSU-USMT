@@ -4,6 +4,8 @@ The GUI now connects native capture and restore. Read the [migration guide](MIGR
 
 ## Technician flow
 
+The launcher checks FullLanguage and the effective execution policy before loading unsigned app scripts, and the entry point repeats the checks before imports. Unsupported application-control/Group Policy conditions get an actionable explanation; no saved policy is changed. RemoteSigned is not blanket-rejected, and normal Windows signature/zone enforcement remains in force.
+
 Keep sfsu-usmt.cmd with the complete App folder, including the new engine C# source and policy/UI modules. Preserve Backups, Logs and App/Settings. Normal GUI startup requests UAC before AD sign-in and hides the console, with a possible brief CMD flash. Already elevated launches skip UAC; cancellation stops startup. A mapped entry path resolves to UNC, but the elevated account still needs share access. No drives/SMB credentials or saved policies are changed. For visible startup diagnostics, run the entry script from an already elevated PowerShell console. Headless/maintenance/BuildUiOnly commands retain caller privileges and synchronous behavior.
 
 The main window remains maximized with the SFSU logo, title and linked Academic Technology attribution; AD sign-in stays normal-sized and centered. Explicit Kerberos-only signed/sealed LDAP, generalized numeric/alphabetic/p-prefixed logins, manual mode, ten-minute inactivity expiry and bounded retry/cancellation are unchanged. Folder spelling remains independent of SID verification. Manual domain identity requires confirmed ID/name; local profiles require a display name. Restricted source metadata access is reported instead of misclassified as a link. System/setup/missing/linked profiles remain excluded. See [identity configuration](IDENTITY.md).
@@ -12,7 +14,7 @@ Select signed-out profiles, then choose **Back up selected profiles**. Each prof
 
 The Restore tab shows verified captures alongside PreparedOnly/incomplete folders. Only verified schema-four native captures restore. Choose **Restore selected backups**. Every target is checked before account/data changes; any local account or employee profile/folder collision stops all targets. For each local account, enter/confirm its masked password, explicitly choose enabled/disabled and choose Administrators membership (default No). Cancelling any prompt clears retained secrets and makes no account/data changes. The final summary excludes passwords. Accounts are created disabled, data applied and final settings verified. Failure preserves partial data and disables only accounts created by that run. Domain identity remains the original SID.
 
-Progress describes the current native command. **Cancel task** stops its job and descendants without rollback or deletion. **Open latest report** and **Open Logs folder** expose native evidence and acceptance limitations. Store verification is not an exhaustive content comparison or intended-user EFS decryption test. Retain sources until the designated restore/coverage/decryption acceptance is complete.
+Progress describes the current native command. During capture/restore, **Cancel task** and window close require exact **CANCEL** plus **Stop migration**; dismissing confirmation keeps work running. Confirmed cancellation stops descendants without rollback or deletion. Local accounts are created just before their own restore; journal details identify created destination SIDs and completed stages. **Open latest report** and **Open Logs folder** expose native evidence. Clean runs finish Completed; actual operational problems or missing required evidence still warn/fail. Store verification is not an exhaustive content comparison or intended-user EFS decryption test.
 
 ## Appearance and accessibility
 
@@ -24,8 +26,11 @@ Account/location dialogs use shared fonts, accessible names, masked password fie
 
 Run with Windows PowerShell 5.1. Fixture writes stay in Git-ignored tests/.work. Native path-guard suites need an ordinary Windows context when the sandbox denies parent-directory handles. New engine tests replace all USMT/profile/account services with synthetic fixtures. Native-process tests start harmless PowerShell children, never vendor executables. UI fixtures do not click live migration actions with real profiles.
 
+November 24 validation limitation: the launcher console-visibility assertion intermittently fails on this test host with both the unchanged Git HEAD launcher and the updated launcher. One updated-launcher run passed all 10 assertions; repeated runs failed visibility. Keep the assertion and validate normal desktop launch/UAC/focus on representative endpoints; the other passing suites do not establish that behavior.
+
 ```powershell
 powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-Engine.ps1
+powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-ReviewChanges.ps1
 powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-EngineNative.ps1
 powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-LiveNativeReporting.ps1
 powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File tests/Test-MigrationUi.ps1

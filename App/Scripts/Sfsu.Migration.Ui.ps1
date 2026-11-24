@@ -16,6 +16,32 @@ function Initialize-SfsuAccountChoice($Choice) {
     })
 }
 
+function New-SfsuCancellationDialog([string]$Action) {
+    $dialog=New-Object Windows.Forms.Form
+    $dialog.Text='Confirm cancellation'; $dialog.ClientSize=New-Object Drawing.Size(580,280)
+    $dialog.StartPosition='CenterParent'; $dialog.Font=$script:SfsuUi.Form.Font
+    $description=New-Object Windows.Forms.Label
+    $description.Text='Cancelling stops the migration. Partial backup data will be preserved.'
+    if ($Action -eq 'Restore backups') { $description.Text='Cancelling stops the restore. Changes already applied and newly created accounts/profiles remain; the profile may be partially restored.' }
+    $dialog.Controls.Add($description)
+    $label=New-Object Windows.Forms.Label; $label.Text='Type CANCEL to stop, or choose Keep running:'; $dialog.Controls.Add($label)
+    $input=New-Object Windows.Forms.TextBox; $input.AccessibleName='Type CANCEL to confirm cancellation'; $dialog.Controls.Add($input)
+    $keep=New-SfsuButton $dialog 'Keep running' 0 150; $keep.DialogResult='Cancel'
+    $stop=New-SfsuButton $dialog 'Stop migration' 0 170; $stop.Enabled=$false
+    $dialog.CancelButton=$keep; $dialog.AcceptButton=$keep
+    $dialog.Tag=[pscustomobject]@{Input=$input;Stop=$stop}
+    $input.Add_TextChanged({param($sender,$event) $sender.FindForm().Tag.Stop.Enabled=($sender.Text -ceq 'CANCEL')})
+    $stop.Add_Click({param($sender,$event) $window=$sender.FindForm(); if ($window.Tag.Input.Text -ceq 'CANCEL') { $window.DialogResult='OK'; $window.Close() }})
+    Initialize-SfsuDialogLayout $dialog @(@{Control=$description;Kind='Label';Lines=3},@{Control=$label;Kind='Label';Lines=1},@{Control=$input;Kind='Input'}) @($keep,$stop)
+    Register-SfsuThemedDialog $dialog
+    $dialog
+}
+
+function Confirm-SfsuMigrationCancellation([string]$Action) {
+    $dialog=New-SfsuCancellationDialog $Action
+    try { $dialog.ShowDialog($script:SfsuUi.Form) -eq 'OK' } finally { $dialog.Dispose() }
+}
+
 function New-SfsuLocalRestoreDialog($Plan) {
     $dialog=New-Object Windows.Forms.Form
     $dialog.Text='Recreate local account'; $dialog.ClientSize=New-Object Drawing.Size(600,560)

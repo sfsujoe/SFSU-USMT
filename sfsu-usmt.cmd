@@ -5,6 +5,8 @@ rem GUI startup requests administrator approval before sign-in when needed.
 rem Bypass is process-only. Headless/developer/maintenance actions do not auto-elevate.
 rem Normal launch shows the existing application/sign-in form without a persistent console.
 rem Argument-based diagnostic commands remain synchronous and visible.
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { Write-Output 'SFSU USMT requires FullLanguage PowerShell. Application control is restricting this session; use an IT-approved execution environment.'; exit 1 }; $policy=Get-ExecutionPolicy; if ($policy -in @('Restricted','AllSigned')) { Write-Output ('SFSU USMT cannot load its unsigned scripts under the effective execution policy: '+$policy+'. Group Policy overrides process-only Bypass. Use an IT-approved package or policy.'); exit 1 }; exit 0"
+if errorlevel 1 goto unsupported
 if not "%~1"=="" goto commandline
 if not exist "%~dp0App\Scripts\Start-SfsuUsmt.ps1" goto missingapp
 start "" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0App\Scripts\Start-SfsuUsmt.ps1"
@@ -22,12 +24,16 @@ echo SFSU USMT could not start Windows PowerShell. Review the error above.
 pause
 exit /b 1
 
+:unsupported
+echo SFSU USMT stopped before loading the application. No execution policy was changed.
+if "%~1"=="" pause
+exit /b 1
+
 :commandline
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File "%~dp0App\Scripts\Start-SfsuUsmt.ps1" %*
 set "sfsuExit=%errorlevel%"
 if not "%sfsuExit%"=="0" (
     echo.
     echo SFSU USMT could not finish. Review the error above and the Logs folder.
-    if "%~1"=="" pause
 )
 exit /b %sfsuExit%

@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'Sfsu.Logging.psm1')
-$script:PolicyVersion='2026.11.07.1'
+$script:PolicyVersion='2026.11.24.1'
 
 function Read-SfsuSmallText([string]$Path) {
     $info=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -13,9 +13,35 @@ function Read-SfsuSmallText([string]$Path) {
 
 function Expand-SfsuProfileLocation([string]$Value,$Profile,[switch]$CloudRoot) {
     $path=$Profile.ProfilePath
-    $values=@{USERPROFILE=$path;LOCALAPPDATA=(Join-Path $path 'AppData/Local');APPDATA=(Join-Path $path 'AppData/Roaming');USERNAME=([IO.Path]::GetFileName($path));HOMEDRIVE=[IO.Path]::GetPathRoot($path).TrimEnd('\');HOMEPATH=$path.Substring(2)}
-    foreach ($name in $values.Keys) { $Value=[regex]::Replace($Value,'%'+$name+'%',([Text.RegularExpressions.MatchEvaluator]{param($m) $values[$name]}.GetNewClosure()),[Text.RegularExpressions.RegexOptions]::IgnoreCase) }
-    $Value=[Environment]::ExpandEnvironmentVariables($Value)
+    $windows=[Environment]::GetFolderPath('Windows')
+    $values=@{
+        USERPROFILE=$path; LOCALAPPDATA=(Join-Path $path 'AppData/Local'); APPDATA=(Join-Path $path 'AppData/Roaming')
+        SystemRoot=$windows; WINDIR=$windows; SystemDrive=[IO.Path]::GetPathRoot($windows).TrimEnd('\')
+        ProgramData=[Environment]::GetFolderPath('CommonApplicationData'); ProgramFiles=[Environment]::GetFolderPath('ProgramFiles')
+        PUBLIC=[IO.Path]::GetDirectoryName([Environment]::GetFolderPath('CommonDocuments'))
+    }
+    foreach ($property in @('SamAccountName','AccountName')) {
+        if ($Profile.PSObject.Properties[$property] -and $Profile.$property) {
+            $values.USERNAME=([string]$Profile.$property -split '\\')[-1]; break
+        }
+    }
+    # Only selected employee hive values may supply user-specific variables.
+    # Never fall back to the elevated technician's environment or folder spelling.
+    if ($Profile.PSObject.Properties['PathVariables']) {
+        foreach ($name in @('OneDrive','OneDriveCommercial','OneDriveConsumer','TEMP','TMP','HOMESHARE','HOMEDRIVE','HOMEPATH','LOCALAPPDATA','APPDATA')) {
+            if ($Profile.PathVariables.ContainsKey($name) -and $Profile.PathVariables[$name]) { $values[$name]=[string]$Profile.PathVariables[$name] }
+        }
+    }
+    for ($pass=0; $pass -lt 10 -and $Value -match '%[^%]+%'; $pass++) {
+        $before=$Value
+        $Value=[regex]::Replace($Value,'%([^%]+)%',([Text.RegularExpressions.MatchEvaluator]{
+            param($match)
+            $name=$match.Groups[1].Value
+            if (-not $values.ContainsKey($name) -or -not $values[$name]) { throw ('Employee path variable is unresolved: %'+$name+'%.') }
+            [string]$values[$name]
+        }.GetNewClosure()))
+        if ($Value -ceq $before) { break }
+    }
     if ($Value -match '[%*?\x00-\x1f]' -or -not [IO.Path]::IsPathRooted($Value) -or $Value -match '^\\[^\\]') { throw 'Provider path is unresolved, relative or contains unsupported pattern characters.' }
     $full=[IO.Path]::GetFullPath($Value).TrimEnd('\')
     if ($full -ieq $path.TrimEnd('\')) { throw 'A cloud exclusion cannot be the entire employee profile.' }
@@ -45,7 +71,51 @@ function Get-SfsuLocationReview($Profile) {
             }
         } catch { $issues.Add($source+': location could not be represented safely; review the provider configuration.') }
     }
-    # Defaults are explicit exclusions even if a provider is currently uninstalled.
+    $pathVariables=@{}
+    $Profile | Add-Member NoteProperty PathVariables $pathVariables -Force
+    $hive=$null
+    try {
+        $hive=[Microsoft.Win32.Registry]::Users.OpenSubKey($Profile.ProfileSid)
+        if ($null -eq $hive) {
+            $hivePath=Join-Path $Profile.ProfilePath 'NTUSER.DAT'
+            # Reject a linked hive/ancestor without requiring source file-list access.
+            $inspection=Get-Item -LiteralPath $hivePath -Force -ErrorAction Stop
+            if ($inspection.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked user hive.' }
+            $hive=[Sfsu.Engine.Accounts]::OpenHive($hivePath)
+        }
+        foreach ($environmentKey in @('Environment','Volatile Environment')) {
+            $key=$hive.OpenSubKey($environmentKey)
+            if ($key) { try {
+                foreach ($name in @('OneDrive','OneDriveCommercial','OneDriveConsumer','TEMP','TMP','HOMESHARE','HOMEDRIVE','HOMEPATH')) {
+                    $value=[string]$key.GetValue($name,'',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    if ($value) { $pathVariables[$name]=$value }
+                }
+            } finally { $key.Dispose() } }
+        }
+        $shell=$hive.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders')
+        if ($shell) { try { foreach ($name in $shell.GetValueNames()) {
+            $value=[string]$shell.GetValue($name,'',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($value) {
+                if ($name -eq 'Local AppData') { $pathVariables.LOCALAPPDATA=$value }
+                if ($name -eq 'AppData') { $pathVariables.APPDATA=$value }
+                $redirected.Add($name+': '+$value)
+            }
+        } } finally { $shell.Dispose() } }
+        $accounts=$hive.OpenSubKey('Software\Microsoft\OneDrive\Accounts')
+        if ($accounts) { try { foreach ($name in $accounts.GetSubKeyNames()) { $key=$accounts.OpenSubKey($name); try { & $addRoot ([string]$key.GetValue('UserFolder','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) 'OneDrive account UserFolder' } finally { $key.Dispose() } } } finally { $accounts.Dispose() } }
+        foreach ($browser in @(@('Chrome','Software\Policies\Google\Chrome'),@('Edge','Software\Policies\Microsoft\Edge'))) {
+            foreach ($registry in @($hive,[Microsoft.Win32.Registry]::LocalMachine)) {
+                $key=$registry.OpenSubKey($browser[1])
+                if ($key) { try {
+                    $value=[string]$key.GetValue('UserDataDir','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    if ($value) { try { $browsers.Add([pscustomobject]@{Browser=$browser[0];Path=(Expand-SfsuProfileLocation $value $Profile)}) } catch { $issues.Add($browser[0]+' custom UserDataDir needs manual review.') } }
+                } finally { $key.Dispose() } }
+            }
+        }
+    } catch { $issues.Add('The user registry could not be fully inspected. Review cloud roots, redirected folders and custom browser data locations manually.') }
+    finally { if ($hive) { $hive.Dispose() } }
+    # Defaults remain exclusions even when a provider is uninstalled. Provider
+    # configs are inspected after the selected employee's variables are known.
     foreach ($relative in @('OneDrive','Box','Box Sync','Dropbox','iCloudDrive','iCloud Drive','Google Drive','AppData/Local/Box','AppData/Roaming/Box','AppData/Local/Dropbox','AppData/Roaming/Dropbox','AppData/Local/Google/DriveFS','AppData/Local/Microsoft/OneDrive')) {
         & $addRoot (Join-Path $Profile.ProfilePath $relative) 'Known provider root/cache'
     }
@@ -61,31 +131,6 @@ function Get-SfsuLocationReview($Profile) {
             } catch { $issues.Add('Dropbox configuration could not be read; confirm its actual root manually.') }
         }
     }
-    $hive=$null
-    try {
-        $hive=[Microsoft.Win32.Registry]::Users.OpenSubKey($Profile.ProfileSid)
-        if ($null -eq $hive) {
-            $hivePath=Join-Path $Profile.ProfilePath 'NTUSER.DAT'
-            # Reject a linked hive/ancestor without requiring source file-list access.
-            $inspection=Get-Item -LiteralPath $hivePath -Force -ErrorAction Stop
-            if ($inspection.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked user hive.' }
-            $hive=[Sfsu.Engine.Accounts]::OpenHive($hivePath)
-        }
-        $accounts=$hive.OpenSubKey('Software\Microsoft\OneDrive\Accounts')
-        if ($accounts) { try { foreach ($name in $accounts.GetSubKeyNames()) { $key=$accounts.OpenSubKey($name); try { & $addRoot ([string]$key.GetValue('UserFolder','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) 'OneDrive account UserFolder' } finally { $key.Dispose() } } } finally { $accounts.Dispose() } }
-        $shell=$hive.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders')
-        if ($shell) { try { foreach ($name in $shell.GetValueNames()) { $value=[string]$shell.GetValue($name,'',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); if ($value) { $redirected.Add($name+': '+$value) } } } finally { $shell.Dispose() } }
-        foreach ($browser in @(@('Chrome','Software\Policies\Google\Chrome'),@('Edge','Software\Policies\Microsoft\Edge'))) {
-            foreach ($registry in @($hive,[Microsoft.Win32.Registry]::LocalMachine)) {
-                $key=$registry.OpenSubKey($browser[1])
-                if ($key) { try {
-                    $value=[string]$key.GetValue('UserDataDir','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-                    if ($value) { try { $browsers.Add([pscustomobject]@{Browser=$browser[0];Path=(Expand-SfsuProfileLocation $value $Profile)}) } catch { $issues.Add($browser[0]+' custom UserDataDir needs manual review.') } }
-                } finally { $key.Dispose() } }
-            }
-        }
-    } catch { $issues.Add('The user registry could not be fully inspected. Review cloud roots, redirected folders and custom browser data locations manually.') }
-    finally { if ($hive) { $hive.Dispose() } }
     # SyncRootManager includes provider/user SID registrations, including roots
     # outside the selected profile that broad system-document discovery could see.
     foreach ($base in @('SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager','SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager')) {
@@ -93,7 +138,11 @@ function Get-SfsuLocationReview($Profile) {
         if ($manager) { try {
             foreach ($provider in $manager.GetSubKeyNames()) {
                 $key=$manager.OpenSubKey($provider+'\UserSyncRoots')
-                if ($key) { try { foreach ($value in $key.GetValueNames()) { & $addRoot ([string]$key.GetValue($value,'',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) ('Windows SyncRootManager: '+$provider) } } finally { $key.Dispose() } }
+                if ($key) { try { foreach ($value in $key.GetValueNames()) {
+                    $location=[string]$key.GetValue($value,'',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    if ($value -ne $Profile.ProfileSid -and $location -match '%') { $issues.Add('Another registered user has a variable-based sync root; confirm its absolute location in the existing review.'); continue }
+                    & $addRoot $location ('Windows SyncRootManager: '+$provider)
+                } } finally { $key.Dispose() } }
             }
         } finally { $manager.Dispose() } }
     }
@@ -151,7 +200,11 @@ function New-SfsuMigrationPolicy {
         $rules=$document.CreateElement('rules'); [void]$role.AppendChild($rules)
         $exclude=$document.CreateElement('unconditionalExclude'); [void]$rules.AppendChild($exclude)
         $objects=$document.CreateElement('objectSet'); [void]$exclude.AppendChild($objects)
-        foreach ($extension in @('exe','msi','ost','tmp')) { Add-SfsuXmlPattern $document $objects File ('* [*.'+$extension+']') }
+        foreach ($extension in @('exe','msi','ost','tmp')) {
+            $scriptNode=$document.CreateElement('script')
+            $scriptNode.InnerText='MigXmlHelper.GenerateDrivePatterns("* [*.'+$extension+']", "Fixed")'
+            [void]$objects.AppendChild($scriptNode)
+        }
         $excluded=@($cloud)+@($OtherProfiles)+@($PackageRoot)+@(
             '%WINDIR%\Temp','%WINDIR%\SoftwareDistribution\Download',
             '%CSIDL_COMMON_APPDATA%\Microsoft\Windows Defender','%CSIDL_COMMON_APPDATA%\Microsoft\Windows Defender Advanced Threat Protection',

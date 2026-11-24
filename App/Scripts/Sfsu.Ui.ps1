@@ -11,7 +11,25 @@ $script:SfsuUi = @{ Root=$packageRoot; Worker=$null; Pending=$null; Credential=$
     DirectoryLastUsedUtc=[DateTime]::MinValue; CredentialIdleMinutes=10
     ThemeId=$appearancePreference.ThemeId; TextScale=$appearancePreference.TextScale; PreferenceWarning=$appearancePreference.Warning; PreviewTheme=''; PreviewTextScale=0; Palette=$null; AppearanceSignature=''
     Dialogs=(New-Object 'Collections.Generic.List[Windows.Forms.Form]'); GridFontScale=0
-    MainLayout=[pscustomobject]@{Interactive=$false;Busy=$false;Signature=''}; MigrationControl=$null; ActiveRestorePlans=@() }
+    MainLayout=[pscustomobject]@{Interactive=$false;Busy=$false;Signature=''}; MigrationControl=$null; ActiveRestorePlans=@(); CancellationDialogOpen=$false }
+
+function Request-SfsuUiCancellation([bool]$CloseWhenDone=$false) {
+    if ($null -eq $script:SfsuUi.Worker -or $script:SfsuUi.CancellationDialogOpen) { return }
+    if (-not $script:SfsuUi.Cancelled -and $script:SfsuUi.Action -in @('Capture profiles','Restore backups')) {
+        $script:SfsuUi.CancellationDialogOpen=$true
+        try { $confirmed=Confirm-SfsuMigrationCancellation $script:SfsuUi.Action }
+        finally { $script:SfsuUi.CancellationDialogOpen=$false }
+        if (-not $confirmed) { return }
+        # The timer can finish the operation while its modal confirmation is open.
+        if ($null -eq $script:SfsuUi.Worker) { if ($CloseWhenDone) { $script:SfsuUi.Form.Close() }; return }
+    }
+    if ($CloseWhenDone) { $script:SfsuUi.CloseWhenDone=$true }
+    if ($script:SfsuUi.Cancelled) { return }
+    $script:SfsuUi.Cancelled=$true; $script:SfsuUi.Cancel.Enabled=$false
+    $script:SfsuUi.Status.Text='Stopping. Partial stores/accounts/data are preserved; no rollback is performed.'
+    if ($script:SfsuUi.Action -in @('Capture profiles','Restore backups')) { $script:SfsuUi.MigrationControl.CancelRequested=$true }
+    else { [void]$script:SfsuUi.Worker.BeginStop($null,$null) }
+}
 
 function Update-SfsuAppearance {
     param($Palette=$null)
@@ -717,13 +735,7 @@ $logs.Add_Click({
     try { $path=Join-Path $script:SfsuUi.Root 'Logs'; [void][IO.Directory]::CreateDirectory($path); Start-Process explorer.exe -ArgumentList ('"'+$path+'"') | Out-Null }
     catch { Show-SfsuMessage $_.Exception.Message }
 })
-$cancelTask.Add_Click({
-    if ($null -ne $script:SfsuUi.Worker) {
-        $script:SfsuUi.Cancelled=$true; $script:SfsuUi.Cancel.Enabled=$false; $script:SfsuUi.Status.Text='Stopping. Any unfinished run remains Incomplete; existing files are preserved.'
-        if ($script:SfsuUi.Action -in @('Capture profiles','Restore backups')) { $script:SfsuUi.MigrationControl.CancelRequested=$true }
-        else { [void]$script:SfsuUi.Worker.BeginStop($null,$null) }
-    }
-})
+$cancelTask.Add_Click({ Request-SfsuUiCancellation })
 $timer=New-Object Windows.Forms.Timer; $timer.Interval=150; $script:SfsuUi.Timer=$timer
 $timer.Add_Tick({
     if ($null -eq $script:SfsuUi.Pending) { return }
@@ -754,8 +766,8 @@ $timer.Add_Tick({
             'Refresh current names' { Set-SfsuBackupRows @($result.Backups); $script:SfsuUi.Status.Text="Current-name lookup: $($result.DirectoryStatus). Historical metadata was preserved." }
             'Review capture locations' { $nextReviews=@($result.Reviews) }
             'Review restore selection' { $nextPlans=@($result.Plans) }
-            'Capture profiles' { $script:SfsuUi.Status.Text='Capture '+$result.Outcome.Replace('CompletedWithWarnings','completed with warnings').ToLowerInvariant()+'. Review native warnings and store verification in the report before retiring the source.' }
-            'Restore backups' { $script:SfsuUi.Status.Text='Restore '+$result.Outcome.Replace('CompletedWithWarnings','completed with warnings').ToLowerInvariant()+'. Review the report and validate sign-in, applications and EFS files as the restored user.' }
+            'Capture profiles' { $script:SfsuUi.Status.Text='Capture '+$result.Outcome.Replace('CompletedWithWarnings','completed with warnings').ToLowerInvariant()+'. See the report for recorded results.' }
+            'Restore backups' { $script:SfsuUi.Status.Text='Restore '+$result.Outcome.Replace('CompletedWithWarnings','completed with warnings').ToLowerInvariant()+'. See the report for recorded results.' }
         }
     } catch {
         $script:SfsuUi.Status.Text='Task stopped: ' + $_.Exception.Message
@@ -785,8 +797,8 @@ $timer.Add_Tick({
 $form.Add_FormClosing({
     param($sender,$event)
     if ($null -ne $script:SfsuUi.Worker) {
-        $event.Cancel=$true; $script:SfsuUi.CloseWhenDone=$true
-        if (-not $script:SfsuUi.Cancelled) { $script:SfsuUi.Cancel.PerformClick() }
+        $event.Cancel=$true
+        Request-SfsuUiCancellation $true
     }
 })
 if (-not $BuildUiOnly) { $form.WindowState='Maximized'; $form.Add_Shown({ Show-SfsuDirectoryCredentials }) }

@@ -63,11 +63,39 @@ try {
         Assert-True ($dialog.ShowDialog($main) -eq 'OK' -and $reviewPlan.Reviewed -and $reviewPlan.AdditionalCloudRoots.Count -eq 1 -and $reviewPlan.AdditionalBrowserRoots.Count -eq 1) 'Reviewed custom cloud and browser roots are attached to the selected profile.'
     } finally { $dialog.Dispose() }
 
-    # Render both forms in the shared dark theme with 200% text. Layout uses the
+    $dialog=New-SfsuCancellationDialog 'Restore backups'
+    $dialog.Add_Shown({
+        param($sender,$event)
+        Assert-True (-not $sender.Tag.Stop.Enabled -and $sender.AcceptButton.Text -eq 'Keep running') 'Cancellation defaults to continuing the operation.'
+        $sender.Tag.Input.Text='cancel'; Assert-True (-not $sender.Tag.Stop.Enabled) 'Lowercase cancellation does not satisfy the explicit confirmation.'
+        $sender.Tag.Input.Text='CANCEL '; Assert-True (-not $sender.Tag.Stop.Enabled) 'Extra characters do not satisfy cancellation.'
+        $sender.Tag.Input.Text='CANCEL'; Assert-True $sender.Tag.Stop.Enabled 'Exact CANCEL enables the stop action.'
+        Save-Dialog $sender 'cancel-restore-normal.png'; $sender.Tag.Stop.PerformClick()
+    })
+    try { Assert-True ($dialog.ShowDialog($main) -eq 'OK') 'Typing CANCEL and choosing Stop confirms cancellation.' } finally { $dialog.Dispose() }
+    $originalConfirmation=${function:Confirm-SfsuMigrationCancellation}
+    function Confirm-SfsuMigrationCancellation([string]$Action) { $script:FixtureConfirmation }
+    try {
+        $script:SfsuUi.Worker=[PowerShell]::Create(); $script:SfsuUi.Action='Restore backups'; $script:SfsuUi.Cancelled=$false
+        $script:SfsuUi.MigrationControl=[hashtable]::Synchronized(@{CancelRequested=$false}); $script:SfsuUi.Cancel.Enabled=$true
+        $script:FixtureConfirmation=$false
+        $script:SfsuUi.Cancel.PerformClick()
+        Assert-True (-not $script:SfsuUi.Cancelled -and -not $script:SfsuUi.MigrationControl.CancelRequested) 'Declining Cancel leaves migration running.'
+        $main.Close()
+        Assert-True ($main.Visible -and -not $script:SfsuUi.CloseWhenDone -and -not $script:SfsuUi.MigrationControl.CancelRequested) 'Declining window close does not arm later closure or terminate migration.'
+        $script:FixtureConfirmation=$true; Request-SfsuUiCancellation $true
+        Assert-True ($script:SfsuUi.CloseWhenDone -and $script:SfsuUi.Cancelled -and $script:SfsuUi.MigrationControl.CancelRequested) 'Confirmed close requests native cancellation and closure only after the worker ends.'
+    } finally {
+        if ($script:SfsuUi.Worker) { $script:SfsuUi.Worker.Dispose() }; $script:SfsuUi.Worker=$null
+        $script:SfsuUi.Cancelled=$false; $script:SfsuUi.CloseWhenDone=$false
+        ${function:Confirm-SfsuMigrationCancellation}=$originalConfirmation
+    }
+
+    # Render forms in the shared dark theme with 200% text. Layout uses the
     # existing scrollable/accessibility framework and does not save preferences.
     $script:SfsuUi.ThemeId='Dark'; $script:SfsuUi.TextScale=200; Update-SfsuAppearance
-    foreach ($kind in @('local','locations')) {
-        $dialog=if ($kind -eq 'local') { New-SfsuLocalRestoreDialog $plan } else { New-SfsuCaptureLocationDialog $reviewPlan }
+    foreach ($kind in @('local','locations','cancel')) {
+        $dialog=if ($kind -eq 'local') { New-SfsuLocalRestoreDialog $plan } elseif ($kind -eq 'cancel') { New-SfsuCancellationDialog 'Restore backups' } else { New-SfsuCaptureLocationDialog $reviewPlan }
         $dialog.Add_Shown({param($sender,$event) Update-SfsuDialogLayout $sender -Force; Save-Dialog $sender ($sender.Text.Replace(' ','-')+'-large.png'); $sender.DialogResult='Cancel'; $sender.Close()})
         try { [void]$dialog.ShowDialog($main); Assert-True ($dialog.AutoScroll -and $dialog.SfsuLayout.Rows.Count -gt 0 -and $dialog.AccessibleName -eq $dialog.Text) 'Large-text migration dialogs keep measured scrollable layout and an accessible name.' } finally { $dialog.Dispose() }
     }

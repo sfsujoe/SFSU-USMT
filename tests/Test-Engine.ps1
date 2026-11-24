@@ -4,6 +4,7 @@
 param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+trap { [Console]::Error.WriteLine($_.ScriptStackTrace); break }
 $repository=Split-Path $PSScriptRoot -Parent
 $root=Join-Path $PSScriptRoot ('.work/engine-'+[guid]::NewGuid().ToString('N').Substring(0,8))
 foreach ($directory in @('App/Reporting','App/Assets','Toolset','Profiles','Destination')) { [void][IO.Directory]::CreateDirectory((Join-Path $root $directory)) }
@@ -29,7 +30,7 @@ $reviews=@((New-Review $local),(New-Review $domain))
     param($root,$profiles)
     $script:FixtureRoot=$root; $script:Sources=$profiles; $script:Calls=New-Object Collections.Generic.List[object]
     $script:Destinations=@(); $script:Accounts=@{}; $script:Mutations=New-Object Collections.Generic.List[string]
-    $script:FailName=''; $script:CancelOnCapture=$false; $script:WarnCapture=$false; $script:CollideName=''; $script:AccountFailure=$false
+    $script:FailName=''; $script:CancelOnCapture=$false; $script:WarnCapture=$false; $script:CollideName=''; $script:AccountFailure=$false; $script:EmptyFileList=$false
     function script:Assert-SfsuMigrationHost([string]$Operation) { [pscustomobject]@{Build=26100;ProductType=1;Version='10.0.26100';Architecture='amd64';Computer='Synthetic'} }
     function script:Get-SfsuToolset([string]$PackageRoot,[string]$Architecture) { [pscustomobject]@{Directory=(Join-Path $script:FixtureRoot 'Toolset');Architecture='amd64';Version='10.0.26100.9457';Files=@()} }
     function script:Get-CimInstance { param($ClassName); $script:Sources | ForEach-Object { [pscustomobject]@{SID=$_.ProfileSid;LocalPath=$_.ProfilePath;Loaded=$_.Loaded;Special=$false} } }
@@ -39,7 +40,7 @@ $reviews=@((New-Review $local),(New-Review $domain))
     function script:New-SfsuRestoreAccount([string]$Name,[Security.SecureString]$Password) {
         if ($script:AccountFailure) { throw 'Synthetic account creation failed.' }
         if ($script:Accounts.ContainsKey($Name)) { throw 'Synthetic account collision.' }
-        $script:Accounts[$Name]=[pscustomobject]@{Enabled=$false;Administrator=$false;Sid='S-1-5-21-44-55-66-1001'}
+        $script:Accounts[$Name]=[pscustomobject]@{Enabled=$false;Administrator=$false;Sid=('S-1-5-21-44-55-66-'+(1001+$script:Accounts.Count))}
         $script:Mutations.Add('Created:'+ $Name); $script:Accounts[$Name].Sid
     }
     function script:Disable-SfsuRestoreAccount([string]$Name) { $script:Accounts[$Name].Enabled=$false; $script:Mutations.Add('Disabled:'+ $Name) }
@@ -62,10 +63,16 @@ $reviews=@((New-Review $local),(New-Review $domain))
             else {
                 if ($script:CancelOnCapture) { $Control.CancelRequested=$true; Test-SfsuMigrationCancellation $Control }
                 $directory=Join-Path $Arguments[0] 'USMT'; [void][IO.Directory]::CreateDirectory($directory); [IO.File]::WriteAllText((Join-Path $directory 'USMT.MIG'),'SYNTHETIC STORE - NOT USMT DATA')
+                $sid=($Arguments | Where-Object { $_ -match '^/ui:S-1-5-21-\d+-\d+-\d+-\d+$' } | Select-Object -First 1).Substring(4)
+                $profile=$script:Sources | Where-Object ProfileSid -eq $sid
+                $list=@($Arguments | Where-Object { $_.StartsWith('/listfiles:') })[0].Substring(11)
+                $entry=Join-Path $profile.ProfilePath 'Documents\fixture.txt'
+                if ($script:EmptyFileList) { $entry='C:\Unselected\fixture.txt' }
+                [IO.File]::WriteAllText($list,$entry)
             }
         } elseif ($Name -eq 'loadstate.exe') {
             $map=@($Arguments | Where-Object { $_.StartsWith('/mu:') })
-            if ($map.Count) { $sid=$script:Accounts['LocalOne'].Sid }
+            if ($map.Count) { $name=(($map[0].Substring(4) -split ':',2)[1] -split '\\')[-1]; $sid=$script:Accounts[$name].Sid }
             else { $sid=($Arguments | Where-Object { $_ -match '^/ui:S-1-5-21-\d+-\d+-\d+-\d+$' } | Select-Object -First 1).Substring(4) }
             $script:Destinations+=([pscustomobject]@{SID=$sid;LocalPath=(Join-Path $script:FixtureRoot ('Destination/'+$sid));Loaded=$false})
         }
@@ -89,17 +96,18 @@ Set-SfsuCaptureLocations $badReview 'D:\Cloud & Files' 'Chrome|D:\Browser Profil
 Assert-True ($badReview.Reviewed -and $badReview.AdditionalCloudRoots.Count -eq 1 -and $badReview.AdditionalBrowserRoots[0].Browser -eq 'Chrome') 'Per-profile custom cloud/browser paths retain exact literal locations.'
 
 $capture=Invoke-SfsuCapture -PackageRoot $root -Reviews $reviews
-Assert-True ($capture.Outcome -eq 'CompletedWithWarnings' -and $capture.Errors.Count -eq 0 -and $capture.Paths.Count -eq 2) 'A synthetic multi-profile capture completes with separate stores and explicit acceptance limitations.'
+Assert-True ($capture.Outcome -eq 'Completed' -and $capture.Errors.Count -eq 0 -and $capture.Paths.Count -eq 2) 'A clean synthetic multi-profile capture completes without routine acceptance warnings.'
 $catalog=@(Get-SfsuBackupCatalog $root)
 Assert-True ($catalog.Count -eq 2 -and @($catalog | Where-Object Status -eq 'Captured - store verified').Count -eq 2) 'Verified native captures have a readable store-verification status in the catalog.'
 $manifest=(Read-SfsuBackupManifest $capture.Paths[0]).Data
 Assert-True ($manifest.SchemaVersion -eq 4 -and $manifest.HasMigrationData -and $manifest.Engine.VerifyExitCode -eq 0 -and -not $manifest.Engine.EfsDecryptionVerified) 'Metadata records structural verification without inventing EFS decryption evidence.'
+Assert-True ($manifest.Engine.Inclusion.Confirmed -and $manifest.Engine.Inclusion.ProfileFileCount -eq 1 -and $manifest.Engine.Inclusion.SourceSid -eq $local.ProfileSid) 'Positive selected-profile file evidence is saved separately from store integrity.'
 $calls=@(& $module { $script:Calls.ToArray() })
 $scan=@($calls | Where-Object { $_.Name -eq 'scanstate.exe' -and $_.Label -like 'Capturing*' })
 Assert-True ($scan.Count -eq 2 -and @($scan[0].Arguments | Where-Object { $_ -eq '/efs:copyraw' }).Count -eq 1 -and $scan[0].Arguments -contains '/r:2' -and $scan[0].Arguments -contains '/w:3') 'Capture uses native EFS raw preservation and bounded native retries.'
 Assert-True (@($calls.Arguments | Where-Object { $_ -match '^/(o|encrypt|key|lac|lae)(:|$)' }).Count -eq 0) 'Capture never overwrites stores, encrypts them or passes account/key secrets.'
 $policyPath=Join-Path $capture.Paths[0] 'Policy/SfsuPolicy.xml'; $xml=[xml][IO.File]::ReadAllText($policyPath)
-foreach ($extension in @('exe','msi','ost','tmp')) { Assert-True (@($xml.SelectNodes('//unconditionalExclude/objectSet/pattern') | Where-Object InnerText -eq ('* [*.'+$extension+']')).Count -eq 2) ('Unconditional '+$extension+' exclusion applies in both contexts.') }
+foreach ($extension in @('exe','msi','ost','tmp')) { Assert-True (@($xml.SelectNodes('//unconditionalExclude/objectSet/script') | Where-Object InnerText -eq ('MigXmlHelper.GenerateDrivePatterns("* [*.'+$extension+']", "Fixed")')).Count -eq 2) ('Fixed-drive '+$extension+' exclusion applies in both contexts.') }
 foreach ($browserFile in @('Bookmarks','History','places.sqlite')) { Assert-True ($xml.OuterXml.Contains('['+$browserFile+']')) ('Browser capture includes '+$browserFile+'.') }
 Assert-True ($xml.OuterXml.Contains('CacheStorage') -and $xml.OuterXml.Contains('cache2') -and $xml.OuterXml.Contains('Windows Defender') -and $xml.OuterXml.Contains('OneDrive')) 'Browser caches, Defender and cloud roots have unconditional exclusions.'
 $config=[xml][IO.File]::ReadAllText((Join-Path $capture.Paths[0] 'Policy/Config.xml'))
@@ -107,6 +115,8 @@ Assert-True ($config.SelectSingleNode('//component[@ID="Windows-Defender-AM-Engi
 Assert-True ($config.SelectNodes('/Configuration/Policies/ErrorControl/fileError/fatal').Count -eq 2 -and $config.SelectSingleNode('/Configuration/Policies/ErrorControl/fileError/fatal').InnerText -eq '* [*]') 'Disk-full fatal rules use the documented Policies hierarchy and text patterns.'
 
 $plans=@(& $module { param($root,$backups) Get-SfsuRestorePlans $root $backups } $root $catalog)
+$localPlan=@($plans | Where-Object AccountType -eq 'Local')[0]
+$domainPlan=@($plans | Where-Object AccountType -eq 'Domain')[0]
 $secure=[Net.NetworkCredential]::new('','Synthetic-only-Password!29').SecurePassword
 foreach ($plan in $plans) { if ($plan.AccountType -eq 'Local') { $plan.LocalOptions=[pscustomobject]@{Password=$secure;Enabled=$true;Administrator=$false} } }
 & $module { $script:CollideName='LocalOne' }
@@ -124,7 +134,7 @@ $blocked=Invoke-SfsuRestore -PackageRoot $root -Backups $plans
 Assert-True ($blocked.Outcome -eq 'Failed' -and (& $module { $script:Mutations.Count }) -eq 0) 'Failed pre-restore store verification prevents every account/data mutation.'
 & $module { $script:FailName='' }
 $restore=Invoke-SfsuRestore -PackageRoot $root -Backups $plans
-Assert-True ($restore.Outcome -eq 'CompletedWithWarnings' -and $restore.Errors.Count -eq 0) 'Synthetic mixed local/domain restore completes after all-target checks with explicit acceptance limitations.'
+Assert-True ($restore.Outcome -eq 'Completed' -and $restore.Errors.Count -eq 0) 'Clean synthetic mixed local/domain restore completes without routine acceptance warnings.'
 $calls=@(& $module { $script:Calls.ToArray() })
 $loads=@($calls | Where-Object Name -eq 'loadstate.exe')
 Assert-True ($loads.Count -eq 2 -and @($loads | Where-Object { $_.Arguments -match '^/mu:' }).Count -eq 1) 'Only local recreation uses a same-name local mapping; domain identity has no remapping.'
@@ -132,23 +142,70 @@ Assert-True (@($loads.Arguments | Where-Object { $_ -match '^/(lac|lae|md)(:|$)'
 Assert-True ((& $module { $script:Accounts['LocalOne'].Enabled }) -and -not (& $module { $script:Accounts['LocalOne'].Administrator })) 'Per-account enabled and standard-user choices are applied after restoration.'
 $events=[IO.File]::ReadAllText((Join-Path $restore.RunDirectory 'events.jsonl'))
 Assert-True (-not $events.Contains('Synthetic-only-Password!29') -and $events.Contains('Enabled=True; Administrators member=False')) 'Reports record final account choices while excluding the password.'
-Assert-True ($events.Contains('EFS-file decryption') -and $events.Contains('CompletedWithWarnings')) 'Successful native/structural checks retain explicit intended-user acceptance limitations.'
+Assert-True (-not $events.Contains('EFS-file decryption') -and -not $events.Contains('"Severity":"WARNING"')) 'Clean results have no unconditional EFS/sign-in acceptance warnings.'
+Assert-True ($events.Contains('DisabledAccountCreated') -and $events.Contains('S-1-5-21-44-55-66-1001') -and $events.Contains('ProfileRegistrationConfirmed')) 'Destination SIDs and per-profile stages are durable in the run journal.'
+
+$metadataPath=Join-Path $localPlan.Path 'backup.json'; $originalMetadata=[IO.File]::ReadAllText($metadataPath)
+try {
+    $older=ConvertFrom-Json $originalMetadata; $older.Engine.PSObject.Properties.Remove('Inclusion')
+    [IO.File]::WriteAllText($metadataPath,(ConvertTo-Json $older -Depth 20))
+    & $module { $script:Destinations=@(); $script:Accounts=@{} }
+    $olderRestore=Invoke-SfsuRestore -PackageRoot $root -Backups @($localPlan)
+    Assert-True ($olderRestore.Outcome -eq 'CompletedWithWarnings' -and $olderRestore.Errors.Count -eq 0 -and [IO.File]::ReadAllText((Join-Path $olderRestore.RunDirectory 'events.jsonl')).Contains('no saved positive profile-file inclusion evidence')) 'Older schema-four stores remain usable with an honest missing-inclusion-evidence warning.'
+    $invalid=ConvertFrom-Json $originalMetadata; $invalid.Engine.Inclusion.SourceSid='S-1-5-21-1-2-3-9999'
+    [IO.File]::WriteAllText($metadataPath,(ConvertTo-Json $invalid -Depth 20))
+    Assert-Throws { Read-SfsuBackupManifest $localPlan.Path } 'capture-inclusion' 'Saved inclusion evidence cannot claim a different source SID.'
+} finally { [IO.File]::WriteAllText($metadataPath,$originalMetadata) }
 
 # Fresh synthetic destination: fail LoadState after account creation and verify
 # disablement, retained source store, no final account-settings application.
 & $module { $script:Destinations=@(); $script:Accounts=@{}; $script:Mutations.Clear(); $script:FailName='loadstate.exe' }
-$failed=Invoke-SfsuRestore -PackageRoot $root -Backups $plans
+$failed=Invoke-SfsuRestore -PackageRoot $root -Backups @($localPlan,$domainPlan)
 Assert-True ($failed.Outcome -eq 'Failed' -and -not (& $module { $script:Accounts['LocalOne'].Enabled }) -and (& $module { $script:Mutations.ToArray() }) -contains 'Disabled:LocalOne') 'Restore failure disables accounts created by this run and preserves partial data.'
 Assert-True (Test-Path -LiteralPath (Join-Path $capture.Paths[0] 'Store/USMT/USMT.MIG')) 'Failure never deletes the source store.'
 & $module { $script:Destinations=@(); $script:Accounts=@{}; $script:Mutations.Clear(); $script:FailName=''; $script:AccountFailure=$true }
 $failed=Invoke-SfsuRestore -PackageRoot $root -Backups $plans
 Assert-True ($failed.Outcome -eq 'Failed' -and (& $module { $script:Mutations.Count }) -eq 0) 'A failed account creation never disables an account that this run did not create.'
 
+# A first-profile failure must not create the second local account. All source
+# stores still verify before the first account mutation.
+$secondLocal=New-Profile LocalTwo 4001
+& $module { param($profile) $script:Sources+=@($profile); $script:AccountFailure=$false; $script:FailName='' } $secondLocal
+$secondCapture=Invoke-SfsuCapture -PackageRoot $root -Reviews @((New-Review $secondLocal))
+$secondPlan=@(& $module { param($root,$backups) Get-SfsuRestorePlans $root $backups } $root @([pscustomobject]@{Path=$secondCapture.Paths[0]}))[0]
+$secondPlan.LocalOptions=[pscustomobject]@{Password=$secure;Enabled=$false;Administrator=$false}
+& $module { $script:Destinations=@(); $script:Accounts=@{}; $script:Mutations.Clear(); $script:Calls.Clear(); $script:FailName='loadstate.exe' }
+$failed=Invoke-SfsuRestore -PackageRoot $root -Backups @($localPlan,$secondPlan)
+Assert-True ($failed.Outcome -eq 'Failed' -and -not (& $module { $script:Accounts.ContainsKey('LocalTwo') })) 'Failure of the first restore leaves later local accounts uncreated.'
+$verifiedCalls=@(& $module { $script:Calls | Where-Object Name -eq 'usmtutils.exe' })
+Assert-True ($verifiedCalls.Count -eq 2 -and @($verifiedCalls | Where-Object Mutations -ne 0).Count -eq 0) 'Both stores verify before any local account is created.'
+& $module { $script:Destinations=@(); $script:Accounts=@{}; $script:Mutations.Clear(); $script:Calls.Clear(); $script:FailName='' }
+$twoLocalRestore=Invoke-SfsuRestore -PackageRoot $root -Backups @($localPlan,$secondPlan)
+$loads=@(& $module { $script:Calls | Where-Object Name -eq 'loadstate.exe' })
+Assert-True ($twoLocalRestore.Outcome -eq 'Completed' -and $loads[0].Mutations -eq 1 -and $loads[1].Mutations -eq 2) 'Each account is created just before its own LoadState, with finalization after apply.'
+
+$emptyProfile=New-Profile EmptyCapture 5001
+& $module { param($profile) $script:Sources+=@($profile); $script:EmptyFileList=$true; $script:Calls.Clear() } $emptyProfile
+$emptyCapture=Invoke-SfsuCapture -PackageRoot $root -Reviews @((New-Review $emptyProfile))
+$emptyManifest=(Read-SfsuBackupManifest $emptyCapture.Paths[0]).Data
+Assert-True ($emptyCapture.Outcome -eq 'Failed' -and -not $emptyManifest.HasMigrationData -and @(& $module { $script:Calls | Where-Object Name -eq 'usmtutils.exe' }).Count -eq 0) 'An intact-looking synthetic store with no selected-profile files cannot become accepted migration data.'
+& $module { $script:EmptyFileList=$false }
+
 # Policy corruption blocks restore before any mutation, even when the metadata
 # still claims that capture and verification succeeded.
+& $module { $script:Destinations=@(); $script:Accounts=@{}; $script:FailName='' }
 $original=[IO.File]::ReadAllText($policyPath); [IO.File]::WriteAllText($policyPath,$original+'<!-- altered -->')
 Assert-Throws { & $module { param($root,$backups) Get-SfsuRestorePlans $root $backups } $root $catalog } 'rules changed' 'A changed policy snapshot is rejected before restore.'
 [IO.File]::WriteAllText($policyPath,$original)
+
+$warningProfile=New-Profile WarningCapture 6001
+& $module { param($profile) $script:Sources=@($profile); $script:WarnCapture=$true } $warningProfile
+$warningCapture=Invoke-SfsuCapture -PackageRoot $root -Reviews @((New-Review $warningProfile))
+$warningManifest=(Read-SfsuBackupManifest $warningCapture.Paths[0]).Data
+Assert-True ($warningCapture.Outcome -eq 'CompletedWithWarnings' -and $warningCapture.Errors.Count -eq 0 -and $warningManifest.Status -eq 'CapturedWithWarnings') 'Operational capture warnings preserve verified data without turning successful completion into failure.'
+$warningEvents=Get-Content -LiteralPath (Join-Path $warningCapture.RunDirectory 'events.jsonl') | ForEach-Object { ConvertFrom-Json $_ }
+Assert-True ($warningEvents[-1].Data.Outcome -eq 'CompletedWithWarnings') 'The logger derives completed-with-warnings from recorded operational evidence.'
+& $module { $script:WarnCapture=$false }
 
 # Cancel during capture: metadata must stay non-restorable and the source sentinel
 # must remain intact. A fresh account/profile avoids folder timestamp collisions.

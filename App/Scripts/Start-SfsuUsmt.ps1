@@ -16,9 +16,15 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$packageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+$packageRoot = ''
 $script:CurrentRun = $null
 $guiRequested = -not ($Headless -or $DiscoverProfiles -or $RebuildReport -or $BuildUiOnly -or $ReviewStorageAccess -or $PreviewLogRetention -or $ApplyLogRetention -or $SnapshotBackupPath)
+
+function Get-SfsuStartupRestriction([string]$LanguageMode,[string]$ExecutionPolicy) {
+    if ($LanguageMode -ne 'FullLanguage') { return 'SFSU USMT requires FullLanguage PowerShell. Application control is restricting this session; use an IT-approved execution environment.' }
+    if ($ExecutionPolicy -in @('Restricted','AllSigned')) { return ('SFSU USMT cannot load its unsigned scripts under the effective execution policy: '+$ExecutionPolicy+'. Group Policy overrides process-only Bypass. Use an IT-approved package or policy.') }
+    ''
+}
 
 function Show-SfsuStartupError([string]$DetailsPath,[string]$Reason='') {
     Add-Type -AssemblyName System.Windows.Forms
@@ -93,7 +99,11 @@ function New-SfsuSampleReport {
 }
 
 $elevationPending=$guiRequested
+$restriction=''
 try {
+    $restriction=Get-SfsuStartupRestriction ([string]$ExecutionContext.SessionState.LanguageMode) ([string](Get-ExecutionPolicy))
+    if ($restriction) { throw $restriction }
+    $packageRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
     if ($guiRequested) {
         Import-Module (Join-Path $PSScriptRoot 'Sfsu.Launch.psm1') -Force
         if (-not (Test-SfsuAdministrator)) {
@@ -132,6 +142,7 @@ try {
     }
     . (Join-Path $PSScriptRoot 'Sfsu.Ui.ps1')
 } catch {
+    if ($restriction) { Write-Error $restriction -ErrorAction Continue; exit 1 }
     # Startup may fail before the reporting module is available. Keep a plain-text fallback.
     $failureText = $_.Exception.ToString()
     $failureMessage = $_.Exception.Message
@@ -147,8 +158,7 @@ try {
     [Console]::Error.WriteLine($failureText)
     if ($guiRequested) {
         try {
-            $reason=if ($elevationPending) { $failureMessage } else { '' }
-            Show-SfsuStartupError -DetailsPath $failurePath -Reason $reason
+            Show-SfsuStartupError -DetailsPath $failurePath -Reason $failureMessage
         }
         catch { [Console]::Error.WriteLine('Could not display the startup error dialog.') }
     }

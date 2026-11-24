@@ -1,12 +1,13 @@
 # Isolated launcher/startup fixtures. No live app discovery, credentials, AD or migration.
 [CmdletBinding()]
-param()
+param([string]$LauncherPath='')
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $repository=Split-Path $PSScriptRoot -Parent
+if (-not $LauncherPath) { $LauncherPath=Join-Path $repository 'sfsu-usmt.cmd' }
 $testRoot=Join-Path $PSScriptRoot ('.work/gui launch & (test)-'+[guid]::NewGuid().ToString('N').Substring(0,8))
 [void][IO.Directory]::CreateDirectory((Join-Path $testRoot 'App/Scripts'))
-Copy-Item -LiteralPath (Join-Path $repository 'sfsu-usmt.cmd') -Destination $testRoot
+Copy-Item -LiteralPath $LauncherPath -Destination (Join-Path $testRoot 'sfsu-usmt.cmd')
 $entryPath=Join-Path $testRoot 'App/Scripts/Start-SfsuUsmt.ps1'
 $script:Assertions=0
 function Assert-True([bool]$Value,[string]$Message) { if (-not $Value) { throw ('FAILED: '+$Message) }; $script:Assertions++ }
@@ -87,7 +88,7 @@ $blockedRoot=Join-Path $testRoot 'blocked'; [void][IO.Directory]::CreateDirector
 [IO.File]::WriteAllText((Join-Path $blockedRoot 'App/Scripts/Sfsu.Launch.psm1'),'function Test-SfsuAdministrator { $true }')
 [IO.File]::WriteAllText((Join-Path $blockedRoot 'App/Scripts/Sfsu.Logging.psm1'),"throw 'Synthetic startup import failure.'")
 [IO.File]::WriteAllText((Join-Path $blockedRoot 'Logs'),'Synthetic obstruction.')
-Copy-Item -LiteralPath (Join-Path $repository 'sfsu-usmt.cmd') -Destination $blockedRoot
+Copy-Item -LiteralPath $LauncherPath -Destination (Join-Path $blockedRoot 'sfsu-usmt.cmd')
 $blocked=Invoke-Launcher '-Scenario Completed' $blockedRoot
 Assert-True ($blocked.ExitCode -eq 1) 'A GUI startup failure without writable Logs still returns failure when launched synchronously.'
 $blockedProbe=Wait-Probe (Join-Path $blockedRoot 'error-probe.json')

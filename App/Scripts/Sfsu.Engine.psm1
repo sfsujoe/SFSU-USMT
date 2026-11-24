@@ -81,23 +81,96 @@ function Read-SfsuNativeTail([string]$Path) {
     } finally { if ($stream) { $stream.Dispose() }; $guard.Dispose() }
 }
 
+function ConvertFrom-SfsuProgressLine([string]$Line) {
+    $fields=@{}
+    $keys=@('program','PHASE','totalPercentageCompleted','detectedUser','includedInMigration','collectingUser','forUser','error','action','errorCode','numberOfIgnoredErrors','nonFatalError')
+    $tokens=New-Object Collections.Generic.List[string]
+    $consumed=0
+    # Tokenize the whole CSV record first: commas/key-like words inside a quoted
+    # object name must never be mistaken for operational error fields.
+    foreach ($match in [regex]::Matches($Line,'\G\s*(?:"(?<quoted>(?:""|[^"])*)"|(?<value>[^,"]*))\s*(?:,|$)')) {
+        if (-not $match.Length) { break }
+        $value=$match.Groups['value'].Value.Trim()
+        if ($match.Groups['quoted'].Success) { $value=$match.Groups['quoted'].Value.Replace('""','"') }
+        $tokens.Add($value); $consumed+=$match.Length
+    }
+    if ($consumed -ne $Line.Length) { throw 'Malformed progress CSV record.' }
+    if ($Line.EndsWith(',')) { $tokens.Add('') }
+    if (-not $tokens.Count) { return $fields }
+    $start=0
+    if ($tokens[0] -notin $keys) {
+        if ($tokens[0] -notmatch '^\d{1,2}\s+\S+\s+\d{4}$') { return $fields }
+        $start=3
+    }
+    if (($tokens.Count-$start)%2) { throw 'Incomplete progress key/value record.' }
+    for ($index=$start; $index+1 -lt $tokens.Count; $index+=2) {
+        if ($tokens[$index] -in $keys) { $fields[$tokens[$index]]=$tokens[$index+1] }
+    }
+    $fields
+}
+
 function Get-SfsuNativeDiagnostics([string]$Log,[string]$Progress,[int]$ExitCode) {
-    $errors=0; $warnings=0; $nonfatal=0
+    $errors=0; $warnings=0; $nonfatal=0; $ignored=0L; $informational=0
+    $unavailable=New-Object Collections.Generic.List[string]
     foreach ($path in @($Log,$Progress)) {
-        if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
-        $guard=Enter-SfsuPathGuard $path; $stream=$null; $reader=$null
+        if (-not $path) { continue }
+        $guard=$null; $stream=$null; $reader=$null; $lines=0; $recognized=0
         try {
+            $guard=Enter-SfsuPathGuard $path
             $stream=[Sfsu.SafeFiles]::OpenSharedRead($path)
             $reader=New-Object IO.StreamReader($stream)
             while (-not $reader.EndOfStream) {
-                $line=$reader.ReadLine()
-                if ($line -match '(?i)\bError\b') { $errors++ }
-                if ($line -match '(?i)\bWarning\b') { $warnings++ }
-                if ($line -match '(?i)nonFatalError') { $nonfatal++ }
+                $line=$reader.ReadLine(); if (-not $line.Trim()) { continue }; $lines++
+                if ($path -eq $Progress) {
+                    $fields=ConvertFrom-SfsuProgressLine $line
+                    if ($fields.Count) { $recognized++ }
+                    if ($fields.ContainsKey('numberOfIgnoredErrors')) {
+                        $count=0L
+                        if (-not [long]::TryParse($fields.numberOfIgnoredErrors,[ref]$count) -or $count -lt 0) { throw 'Invalid ignored-error count.' }
+                        $ignored=[Math]::Max($ignored,$count)
+                    }
+                    if (($fields.ContainsKey('error') -and $fields.error -notin @('','0','None')) -or
+                        ($fields.ContainsKey('action') -and $fields.action -eq 'Ignore') -or
+                        ($fields.ContainsKey('nonFatalError') -and $fields.nonFatalError -notin @('','0'))) { $nonfatal++ }
+                } elseif ($line -match '^\s*\d{4}-\d{2}-\d{2}\s+[^,]+,\s*(Error|Warning)\s+(?:\[[^\]]*\]\s*)?(.*)$') {
+                    $severity=$Matches[1]; $message=$Matches[2]
+                    if ($severity -eq 'Error') { $errors++ }
+                    elseif ($message -match '(?i)fail|unable|cannot|could not|denied|corrupt|skip|missing|not (copied|migrated|applied|found)|lost|loss') { $warnings++ }
+                    else { $informational++ }
+                }
             }
-        } finally { if ($reader) { $reader.Dispose() } elseif ($stream) { $stream.Dispose() }; $guard.Dispose() }
+            if (-not $lines -or ($path -eq $Progress -and -not $recognized)) { throw 'Required diagnostics are empty or unrecognized.' }
+        } catch {
+            if ($_.Exception -is [OperationCanceledException] -or $_.Exception -is [Management.Automation.PipelineStoppedException]) { throw }
+            $unavailable.Add($path+': '+$_.Exception.Message)
+        } finally { if ($reader) { $reader.Dispose() } elseif ($stream) { $stream.Dispose() }; if ($guard) { $guard.Dispose() } }
     }
-    [pscustomobject]@{ExitCode=$ExitCode;ErrorLines=$errors;WarningLines=$warnings;NonFatalRecords=$nonfatal;HasWarnings=($ExitCode -eq 3 -or $errors -gt 0 -or $warnings -gt 0 -or $nonfatal -gt 0)}
+    [pscustomobject]@{
+        ExitCode=$ExitCode; ErrorLines=$errors; WarningLines=$warnings; NonFatalRecords=$nonfatal
+        IgnoredErrors=$ignored; InformationalWarnings=$informational; UnavailableDiagnostics=$unavailable.ToArray()
+        HasWarnings=($ExitCode -eq 3 -or $errors -gt 0 -or $warnings -gt 0 -or $nonfatal -gt 0 -or $ignored -gt 0 -or $unavailable.Count -gt 0)
+    }
+}
+
+function Get-SfsuCaptureInclusion([string]$ListPath,$Profile) {
+    $root=[IO.Path]::GetFullPath($Profile.ProfilePath).TrimEnd('\')+'\'
+    $guard=Enter-SfsuPathGuard $ListPath; $stream=$null; $reader=$null; $count=0L
+    try {
+        $stream=[Sfsu.SafeFiles]::Open($ListPath,$false,$false)
+        $reader=New-Object IO.StreamReader($stream)
+        while (-not $reader.EndOfStream) {
+            $line=$reader.ReadLine().Trim().Trim('"')
+            if ($line.StartsWith('\\?\UNC\',[StringComparison]::OrdinalIgnoreCase)) { $line='\\'+$line.Substring(8) }
+            elseif ($line.StartsWith('\\?\')) { $line=$line.Substring(4) }
+            if (-not [IO.Path]::IsPathRooted($line)) { continue }
+            try { $line=[IO.Path]::GetFullPath($line) } catch { continue }
+            # USMT lists gathered paths. Require a child of the exact selected
+            # profile, not a substring or a similarly named neighboring profile.
+            if ($line.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -and $line.Length -gt $root.Length) { $count++ }
+        }
+        if (-not $count) { throw 'No gathered file under the selected employee profile was found in the native file list. Capture inclusion cannot be confirmed.' }
+        [pscustomobject]@{SourceSid=$Profile.ProfileSid;ProfilePath=$Profile.ProfilePath;ProfileFileCount=$count;EvidenceFile=[IO.Path]::GetFileName($ListPath);Confirmed=$true;Scope='Positive profile-file inclusion; not an exhaustive content comparison.'}
+    } finally { if ($reader) { $reader.Dispose() } elseif ($stream) { $stream.Dispose() }; $guard.Dispose() }
 }
 
 function Start-SfsuNativeProcess([string]$Path,[string]$Arguments,[string]$Directory) {
@@ -275,7 +348,8 @@ function Invoke-SfsuCapture {
                 $config=Join-Path $policy 'Config.xml'
                 $genlog=Get-SfsuRawLogPath $run ($prefix+'-config.log')
                 $genargs=@(('/genconfig:'+$config),('/i:'+(Join-Path $policy 'MigApp.xml')),('/i:'+(Join-Path $policy 'MigDocs.xml')),('/i:'+(Join-Path $policy 'SfsuPolicy.xml')),('/l:'+$genlog),'/v:5')
-                Invoke-SfsuNativeTool -Tools $tools -Name scanstate.exe -Arguments $genargs -Run $run -StepId capture -Label 'Generate native component configuration' -Log $genlog -Control $Control | Out-Null
+                $generated=Invoke-SfsuNativeTool -Tools $tools -Name scanstate.exe -Arguments $genargs -Run $run -StepId capture -Label 'Generate native component configuration' -Log $genlog -Control $Control
+                $planningWarnings=$generated.HasWarnings
                 $disabled=Set-SfsuGeneratedConfig $config
                 Test-SfsuMigrationRules $policy
                 $current.Manifest.Engine.PolicyFiles=@(foreach ($name in @('MigApp.xml','MigDocs.xml','SfsuPolicy.xml','Config.xml')) { [pscustomobject]@{Name=$name;Sha256=(Get-FileHash -LiteralPath (Join-Path $policy $name) -Algorithm SHA256).Hash} })
@@ -284,7 +358,8 @@ function Invoke-SfsuCapture {
                 $common=@(Get-SfsuRuleArguments $policy)+@(Get-SfsuUserArguments $review.Profile.ProfileSid)+@('/efs:copyraw','/c','/r:2','/w:3','/v:5')
                 $estimate=Get-SfsuRawLogPath $run ($prefix+'-estimate.xml'); $estlog=Get-SfsuRawLogPath $run ($prefix+'-estimate.log')
                 Set-SfsuMigrationProgress $Control ('Estimating '+$review.Profile.DisplayName)
-                Invoke-SfsuNativeTool -Tools $tools -Name scanstate.exe -Arguments (@($store)+$common+@(('/p:'+$estimate),('/l:'+$estlog))) -Run $run -StepId capture -Label 'Estimate capture size' -Log $estlog -Control $Control | Out-Null
+                $estimatedResult=Invoke-SfsuNativeTool -Tools $tools -Name scanstate.exe -Arguments (@($store)+$common+@(('/p:'+$estimate),('/l:'+$estlog))) -Run $run -StepId capture -Label 'Estimate capture size' -Log $estlog -Control $Control
+                $planningWarnings=$planningWarnings -or $estimatedResult.HasWarnings
                 if (Test-Path -LiteralPath $estimate) {
                     Add-SfsuRawLog $run ([IO.Path]::GetFileName($estimate)) capture
                     $estimated=Read-SfsuStoreEstimate $estimate
@@ -292,13 +367,16 @@ function Invoke-SfsuCapture {
                     $current.Manifest.Engine['EstimatedStoreBytes']=$estimated; $current.Manifest.Engine['DestinationFreeBytes']=$free
                     Write-SfsuLogEvent -Run $run -StepId capture -Message ('Native store estimate: '+$estimated+' bytes (maximum reported cluster-size estimate); destination available: '+$free+' bytes.')
                     if ($estimated -gt 0 -and $free -lt [decimal]$estimated*1.1) { throw 'The destination lacks the native estimated store size plus a 10 percent working margin. Capture was not started.' }
-                    if ($estimated -eq 0) { Write-SfsuLogEvent -Run $run -StepId capture -Severity WARNING -Message 'USMT wrote an estimate but its size format was not recognized. The original estimate is retained; native disk-full handling still applies.' }
+                    if ($estimated -eq 0) { $planningWarnings=$true; Write-SfsuLogEvent -Run $run -StepId capture -Severity WARNING -Message 'USMT wrote an estimate but its size format was not recognized. The original estimate is retained; native disk-full handling still applies.' }
                 }
                 $log=Get-SfsuRawLogPath $run ($prefix+'-scanstate.log'); $progress=Get-SfsuRawLogPath $run ($prefix+'-scan-progress.log'); $list=Get-SfsuRawLogPath $run ($prefix+'-files.txt')
                 $captured=Invoke-SfsuNativeTool -Tools $tools -Name scanstate.exe -Arguments (@($store)+$common+@(('/l:'+$log),('/progress:'+$progress),('/listfiles:'+$list))) -Run $run -StepId capture -Label ('Capturing '+$review.Profile.DisplayName+' ('+$index+'/'+$Reviews.Count+')') -Log $log -Progress $progress -Control $Control
                 $current.Manifest.Engine.CaptureExitCode=$captured.ExitCode
-                $current.Manifest.Engine['CaptureWarnings']=$captured.HasWarnings
-                if (Test-Path -LiteralPath $list) { Add-SfsuRawLog $run ([IO.Path]::GetFileName($list)) capture }
+                $current.Manifest.Engine['CaptureWarnings']=($captured.HasWarnings -or $planningWarnings)
+                $inclusion=Get-SfsuCaptureInclusion $list $review.Profile
+                $current.Manifest.Engine['Inclusion']=$inclusion
+                Add-SfsuRawLog $run ([IO.Path]::GetFileName($list)) capture
+                Write-SfsuCheckpoint -Run $run -StepId capture -Status Passed -Message ('Confirmed '+$inclusion.ProfileFileCount+' listed file(s) under the selected employee profile.') -Details (ConvertTo-Json $inclusion -Compress)
                 Save-SfsuEngineManifest $current.Path $current.Manifest
             } finally { $lease.Dispose() }
         }
@@ -320,9 +398,10 @@ function Invoke-SfsuCapture {
                 Write-SfsuCheckpoint -Run $run -StepId verify -Status Passed -Message ($current.Path+': compressed catalog and files passed UsmtUtils /verify:all.')
             } finally { if ($hold) { $hold.Dispose() }; $lease.Dispose() }
         }
-        Write-SfsuCheckpoint -Run $run -StepId verify -Status Warning -Message 'Store integrity was checked. Intended-user EFS decryption and application/browser fidelity require an actual restore test; they are not established by a successful capture.' -NextAction 'Retain the source until coverage, warnings and intended-user decryption are accepted.'
         Complete-SfsuLogStep $run verify Passed 'Store verification ended; detailed evidence and limitations are retained.'
-        $outcome='CompletedWithWarnings'; Complete-SfsuLogRun $run Completed 'Capture finished. Review warnings and restore/decryption acceptance before re-imaging.' | Out-Null
+        $outcome='Completed'
+        if (@($backups | Where-Object { $_.Manifest.Status -eq 'CapturedWithWarnings' }).Count) { $outcome='CompletedWithWarnings' }
+        Complete-SfsuLogRun $run Completed 'Capture finished; native results, profile-file inclusion and store-integrity checks are recorded.' | Out-Null
     } catch {
         $cancelled=$_.Exception -is [OperationCanceledException]; $outcome='Failed'; if ($cancelled) { $outcome='Cancelled' }
         $errors.Add($_.Exception.Message)
@@ -349,6 +428,15 @@ function Set-SfsuRestoreAccountState($Plan,[string]$Sid) {
     if ([Sfsu.Engine.Accounts]::IsAdministrator($Plan.AccountName) -ne $Plan.LocalOptions.Administrator) { throw 'The restored account Administrators membership did not match the technician choice; the account stays disabled.' }
     [Sfsu.Engine.Accounts]::SetEnabled($Plan.AccountName,$Plan.LocalOptions.Enabled)
     if ([Sfsu.Engine.Accounts]::Enabled($Plan.AccountName) -ne $Plan.LocalOptions.Enabled) { throw 'The restored account enabled state could not be verified.' }
+}
+
+function Write-SfsuRestoreEvidence($Run,$Plan,[string]$Stage,[string]$DestinationSid='') {
+    $evidence=[ordered]@{
+        Stage=$Stage; BackupPath=$Plan.Path; SourceSid=$Plan.ProfileSid
+        AccountType=$Plan.AccountType; AccountName=$Plan.AccountName
+        DestinationComputer=$env:COMPUTERNAME; DestinationSid=$DestinationSid
+    }
+    Write-SfsuLogEvent -Run $Run -StepId apply -Message ('Restore target: '+$Stage+'.') -Details (ConvertTo-Json $evidence -Compress)
 }
 
 function Get-SfsuRestorePlans {
@@ -412,6 +500,7 @@ function Invoke-SfsuRestore {
     $run=New-SfsuLogRun -PackageRoot $PackageRoot -Operation Restore -Steps @(@{Id='preflight';Title='Preflight every selected target'},@{Id='verify';Title='Verify every selected store before account/data changes'},@{Id='apply';Title='Restore selected identities'},@{Id='accounts';Title='Apply and verify requested local-account settings'}) -Label 'Native USMT restore. Existing accounts/profiles are never reused.'
     $created=New-Object Collections.Generic.List[object]; $errors=New-Object Collections.Generic.List[string]; $active='preflight'; $outcome='Failed'; $plans=@()
     $storeGuards=New-Object Collections.Generic.List[object]; $storeStreams=New-Object Collections.Generic.List[object]
+    $hasWarnings=$false
     try {
         Start-SfsuLogStep $run preflight; Test-SfsuMigrationCancellation $Control
         $hostInfo=Assert-SfsuMigrationHost Restore; $tools=Get-SfsuToolset $PackageRoot $hostInfo.Architecture
@@ -429,35 +518,45 @@ function Invoke-SfsuRestore {
         foreach ($plan in $plans) {
             Test-SfsuMigrationCancellation $Control; $index++; $store=Join-Path $plan.Path 'Store/USMT/USMT.MIG'
             $log=Get-SfsuRawLogPath $run ('p'+$index+'-pre-restore-verify.log')
-            Invoke-SfsuNativeTool -Tools $tools -Name usmtutils.exe -Arguments @('/verify:all',$store,('/l:'+$log)) -Run $run -StepId verify -Label ('Verify source store '+$index) -Log $log -Control $Control | Out-Null
-            if ($plan.Manifest.Status -eq 'CapturedWithWarnings') { Write-SfsuLogEvent -Run $run -StepId verify -Severity WARNING -Message 'This store was captured with warnings/nonfatal errors. Restore cannot recover files that capture omitted.' }
+            $verified=Invoke-SfsuNativeTool -Tools $tools -Name usmtutils.exe -Arguments @('/verify:all',$store,('/l:'+$log)) -Run $run -StepId verify -Label ('Verify source store '+$index) -Log $log -Control $Control
+            if ($verified.HasWarnings) { $hasWarnings=$true }
+            if ($plan.Manifest.Status -eq 'CapturedWithWarnings') {
+                $hasWarnings=$true
+                Write-SfsuLogEvent -Run $run -StepId verify -Severity WARNING -Message 'This store was captured with operational warnings/nonfatal errors. The original diagnostics remain relevant.'
+            }
+            if (-not $plan.Manifest.Engine.PSObject.Properties['Inclusion']) {
+                $hasWarnings=$true
+                Write-SfsuLogEvent -Run $run -StepId verify -Severity WARNING -Message 'This older capture has no saved positive profile-file inclusion evidence. Store integrity alone cannot establish intended-user inclusion.'
+            }
         }
         Complete-SfsuLogStep $run verify Passed 'Every selected compressed store passed native verification before provisioning.'
         # Repeat all-target collision checks immediately before the first mutation.
         $plans=@(Get-SfsuRestorePlans -PackageRoot $PackageRoot -Backups $Backups -RequireOptions)
         $active='apply'; Start-SfsuLogStep $run apply
+        $index=0
         foreach ($plan in $plans) {
-            Test-SfsuMigrationCancellation $Control
+            Test-SfsuMigrationCancellation $Control; $index++
+            $expected=$plan.ProfileSid
             if ($plan.AccountType -eq 'Local') {
+                Write-SfsuRestoreEvidence $run $plan AccountCreationRequested
                 $record=[pscustomobject]@{Plan=$plan;Sid='';Created=$false}
                 $created.Add($record)
                 $record.Sid=New-SfsuRestoreAccount $plan.AccountName $plan.LocalOptions.Password
                 $record.Created=$true
-                Write-SfsuLogEvent -Run $run -StepId apply -Message ('Created disabled local account '+$plan.AccountName+'. Password omitted from all reports/arguments.')
+                $expected=$record.Sid
+                Write-SfsuRestoreEvidence $run $plan DisabledAccountCreated $expected
             }
-        }
-        $index=0
-        foreach ($plan in $plans) {
-            Test-SfsuMigrationCancellation $Control; $index++
+            Write-SfsuRestoreEvidence $run $plan ApplyStarted $expected
             $lease=Enter-SfsuPathGuard $plan.Path; $hold=$null
             try {
                 $store=Join-Path $plan.Path 'Store'; $hold=[Sfsu.SafeFiles]::Open((Join-Path $store 'USMT/USMT.MIG'),$false,$false)
                 $log=Get-SfsuRawLogPath $run ('p'+$index+'-loadstate.log'); $progress=Get-SfsuRawLogPath $run ('p'+$index+'-load-progress.log')
                 $arguments=@($store)+@(Get-SfsuRuleArguments $plan.PolicyDirectory)+@(Get-SfsuUserArguments $plan.ProfileSid)+@('/c','/r:2','/w:3','/v:5',('/l:'+$log),('/progress:'+$progress))
                 if ($plan.AccountType -eq 'Local') { $arguments+=('/mu:'+$plan.Manifest.SourceComputer+'\'+$plan.AccountName+':'+$env:COMPUTERNAME+'\'+$plan.AccountName) }
-                Invoke-SfsuNativeTool -Tools $tools -Name loadstate.exe -Arguments $arguments -Run $run -StepId apply -Label ('Restoring '+$plan.DisplayName+' ('+$index+'/'+$plans.Count+')') -Log $log -Progress $progress -Control $Control | Out-Null
-                $expected=$plan.ProfileSid; if ($plan.AccountType -eq 'Local') { $expected=($created | Where-Object { $_.Plan.Path -eq $plan.Path }).Sid }
+                $applied=Invoke-SfsuNativeTool -Tools $tools -Name loadstate.exe -Arguments $arguments -Run $run -StepId apply -Label ('Restoring '+$plan.DisplayName+' ('+$index+'/'+$plans.Count+')') -Log $log -Progress $progress -Control $Control
+                if ($applied.HasWarnings) { $hasWarnings=$true }
                 if (@(Get-SfsuDestinationProfiles | Where-Object SID -eq $expected).Count -ne 1) { throw 'LoadState exited but the intended destination profile registration was not found. Restore verification failed.' }
+                Write-SfsuRestoreEvidence $run $plan ProfileRegistrationConfirmed $expected
                 Write-SfsuCheckpoint -Run $run -StepId apply -Status Passed -Message ('Native apply ended and the intended destination SID/profile registration was found for '+$plan.DisplayName+'.')
             } finally { if ($hold) { $hold.Dispose() }; $lease.Dispose() }
         }
@@ -468,19 +567,23 @@ function Invoke-SfsuRestore {
             Set-SfsuRestoreAccountState $record.Plan $record.Sid
             Write-SfsuCheckpoint -Run $run -StepId accounts -Status Passed -Message ('Verified '+$record.Plan.AccountName+': Enabled='+$record.Plan.LocalOptions.Enabled+'; Administrators member='+$record.Plan.LocalOptions.Administrator+'.')
         }
-        Write-SfsuCheckpoint -Run $run -StepId accounts -Status Warning -Message 'Intended-user sign-in, EFS-file decryption and application/browser fidelity have not been exercised by this administrator restore. Sign in as each restored user and validate before retiring the source.'
         Complete-SfsuLogStep $run accounts Passed 'Requested local-account settings were checked; domain-account memberships were not changed by the application.'
-        $outcome='CompletedWithWarnings'; Complete-SfsuLogRun $run Completed 'Restore finished. Review native warnings and perform intended-user acceptance; partial results are never represented as a complete content comparison.' | Out-Null
+        $outcome='Completed'; if ($hasWarnings) { $outcome='CompletedWithWarnings' }
+        Complete-SfsuLogRun $run Completed 'Restore finished; native results, profile registrations and requested account states are recorded.' | Out-Null
     } catch {
         $outcome='Failed'; if ($_.Exception -is [OperationCanceledException]) { $outcome='Cancelled' }
         $errors.Add($_.Exception.Message)
-        Write-SfsuLogEvent -Run $run -StepId $active -Severity ERROR -Message $errors[$errors.Count-1] -NextAction 'Accounts/data already created are preserved. Newly created local accounts are disabled on failure; resolve collisions manually before another attempt.'
         foreach ($record in $created) {
             # Never disable an account that another operator created after our
             # preflight. The native adapter handles its own post-create failure.
-            try { if ($record.Created) { Disable-SfsuRestoreAccount $record.Plan.AccountName } }
-            catch { Write-SfsuLogEvent -Run $run -StepId $active -Severity ERROR -Message 'Could not confirm disablement of a newly provisioned local account. Technician intervention is required.' }
+            try {
+                if ($record.Created) {
+                    Disable-SfsuRestoreAccount $record.Plan.AccountName
+                    Write-SfsuLogEvent -Run $run -StepId $active -Message 'Run-created local account disabled after interruption.' -Details (ConvertTo-Json @{AccountName=$record.Plan.AccountName;DestinationSid=$record.Sid;Stage='DisabledAfterInterruption'} -Compress)
+                }
+            } catch { $errors.Add('Could not finish disablement/evidence recording for a run-created local account. Check its destination SID in this journal.') }
         }
+        Write-SfsuLogEvent -Run $run -StepId $active -Severity ERROR -Message ($errors -join ' ') -NextAction 'Partial accounts/data are preserved. Use this run journal to identify destination SIDs and completed stages; resolve collisions before retrying. No automatic deletion or rollback is performed.'
         Complete-SfsuLogRun $run $outcome 'Restore stopped. Existing source stores, partial destination data and account evidence were preserved; no rollback/deletion was attempted.' | Out-Null
     } finally {
         foreach ($stream in $storeStreams) { $stream.Dispose() }

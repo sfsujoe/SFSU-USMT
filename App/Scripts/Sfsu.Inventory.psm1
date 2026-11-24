@@ -18,11 +18,11 @@ function Test-SfsuAccountName($Value) {
     $Value -is [string] -and -not [string]::IsNullOrWhiteSpace($Value) -and $Value.Length -le 256 -and $Value -notmatch '[\p{C}]'
 }
 
-function Test-SfsuProfileVerified($Profile) {
+function Test-SfsuDirectoryIdentityEvidence($Profile,[string]$Sid) {
     try {
         if ($Profile.AccountType -ne 'Domain' -or $Profile.IdentitySource -ne 'LDAP' -or
-            $Profile.IdentityStatus -ne 'Directory verified' -or -not $Profile.VerifiedAtUtc -or
-            $Profile.DirectorySid -ne $Profile.ProfileSid -or $Profile.ManualConfirmed -or
+            -not $Profile.VerifiedAtUtc -or
+            $Profile.DirectorySid -ne $Sid -or $Profile.ManualConfirmed -or
             $Profile.SfsuIdSource -ne 'LDAP' -or $Profile.SfsuIdAttribute -notmatch '^[a-zA-Z][a-zA-Z0-9-]{0,63}$' -or
             -not (Test-SfsuIdentityText $Profile.SfsuId) -or -not (Test-SfsuAccountName $Profile.SamAccountName) -or
             $Profile.AccountName -cne $Profile.SamAccountName -or [string]::IsNullOrWhiteSpace($Profile.DisplayName)) { return $false }
@@ -31,6 +31,11 @@ function Test-SfsuProfileVerified($Profile) {
         [void][DateTimeOffset]::Parse($Profile.VerifiedAtUtc,[Globalization.CultureInfo]::InvariantCulture)
         return $true
     } catch { return $false }
+}
+
+function Test-SfsuProfileVerified($Profile) {
+    try { $Profile.IdentityStatus -eq 'Directory verified' -and (Test-SfsuDirectoryIdentityEvidence $Profile $Profile.ProfileSid) }
+    catch { $false }
 }
 
 function Get-SfsuPacificTime([DateTimeOffset]$Time = [DateTimeOffset]::UtcNow) {
@@ -149,14 +154,9 @@ function Open-SfsuLoggedDirectorySession {
     Assert-SfsuDirectoryCredential $Credential
     $windowsAccount = 'Unavailable'
     try { $windowsAccount = Get-SfsuWindowsIdentityName } catch { }
-    $source = 'Default Windows credentials'
-    $account = 'Windows-selected default account; not independently verified'
-    $evidence = 'The Windows execution identity is context only. Outbound credentials can differ, for example with network-only logon or target-specific Windows credentials.'
-    if ($null -ne $Credential) {
-        $source = 'Explicit directory credentials'
-        $account = $Credential.UserName
-        $evidence = 'Username supplied for the LDAP bind; not a directory-confirmed identity.'
-    }
+    $source = 'Explicit directory credentials'
+    $account = $Credential.UserName
+    $evidence = 'Username supplied for the LDAP bind; not a directory-confirmed identity.'
     # Build diagnostics only from account-name strings. Never serialize the
     # PSCredential, SecureString, NetworkCredential, or password into the journal.
     $details = @(
@@ -167,8 +167,7 @@ function Open-SfsuLoggedDirectorySession {
         ('Windows execution identity: ' + $windowsAccount),
         ('Account evidence: ' + $evidence)
     ) -join "`n"
-    $context = $windowsAccount
-    if ($null -ne $Credential) { $context = $account }
+    $context = $account
     Write-SfsuLogEvent -Run $Run -StepId $StepId -Message ('Attempting LDAP connection to ' + $Server + ' using ' + $source + '; account context: ' + $context + '.') -Details $details
     # Persist the attempted context before binding, including when binding fails.
     New-SfsuDirectorySession -Server $Server -Credential $Credential
@@ -422,27 +421,14 @@ function New-SfsuPreparedBackup {
     $pacific = Get-SfsuPacificTime $Timestamp
     $folderName = $id + '_' + $name + '_' + $computer + '_' + $pacific.ToString('yyyyMMdd-HHmmss')
     $destination = Join-Path $root $folderName
-    if (-not ('Sfsu.DirectoryReservation' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace Sfsu {
-  public static class DirectoryReservation {
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    private static extern bool CreateDirectory(string path, IntPtr security);
-    public static void Reserve(string path) {
-      if (!CreateDirectory(path, IntPtr.Zero)) {
-        int code = Marshal.GetLastWin32Error();
-        if (code == 183) throw new System.IO.IOException("A backup folder with this timestamp already exists. Nothing was overwritten; retry with a new timestamp.");
-        throw new System.ComponentModel.Win32Exception(code);
-      }
-    }
-  }
-}
-'@
-    }
     # Atomic mkdir fails on existing paths, including concurrent starts. No overwrite or merge.
-    [Sfsu.DirectoryReservation]::Reserve($destination)
+    try { [Sfsu.SafeFiles]::ReserveDirectory($destination) }
+    catch {
+        $cause=$_.Exception
+        while ($cause -and $cause -isnot [ComponentModel.Win32Exception]) { $cause=$cause.InnerException }
+        if ($cause -and $cause.NativeErrorCode -eq 183) { throw 'A backup folder with this timestamp already exists. Nothing was overwritten; retry with a new timestamp.' }
+        throw
+    }
     $destinationGuard=Enter-SfsuPathGuard $destination
     $manifest = [ordered]@{
         SchemaVersion=3; Kind='SfsuUsmtBackup'; Status='PreparedOnly'; HasMigrationData=$false
@@ -490,14 +476,14 @@ function Invoke-SfsuBackupPreparation {
     [pscustomobject]@{ Paths=$prepared.ToArray(); Errors=$errors.ToArray(); ReportPath=$run.ReportPath; RunDirectory=$run.RunDirectory }
 }
 
-function Assert-SfsuIdentityEvidence($Identity,[string]$Sid) {
+function Assert-SfsuIdentityFields($Identity,[string]$Sid) {
     foreach ($property in @('DisplayName','AccountName','SfsuId','SfsuIdSource','SfsuIdAttribute','DirectorySid','SamAccountName','UserPrincipalName','VerifiedAtUtc')) {
         $value=$Identity.$property
         if ($value -isnot [string] -or $value.Length -gt 1024 -or $value -match '[\p{C}]') { throw 'Invalid identity text.' }
     }
     if ([string]::IsNullOrWhiteSpace($Identity.DisplayName) -or $Identity.ManualConfirmed -isnot [bool]) { throw 'Missing identity name or confirmation.' }
     if ($Identity.IdentitySource -eq 'LDAP') {
-        if (-not (Test-SfsuProfileVerified $Identity)) { throw 'Directory identity does not match the source profile SID/account evidence.' }
+        if (-not (Test-SfsuDirectoryIdentityEvidence $Identity $Sid)) { throw 'Directory identity does not match the source profile SID/account evidence.' }
     } elseif ($Identity.IdentitySource -eq 'Manual') {
         if (-not $Identity.ManualConfirmed -or $Identity.DirectorySid -or $Identity.SamAccountName -or $Identity.UserPrincipalName -or $Identity.VerifiedAtUtc -or $Identity.SfsuIdAttribute) { throw 'Inconsistent manual identity.' }
         if ($Identity.AccountType -eq 'Domain') {
@@ -507,6 +493,16 @@ function Assert-SfsuIdentityEvidence($Identity,[string]$Sid) {
         } else { throw 'Unknown account type.' }
     } else { throw 'Identity must be directory verified or manually confirmed.' }
     if ($Sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'Missing source account SID.' }
+}
+
+function Assert-SfsuIdentityEvidence($Identity,[string]$Sid) {
+    Assert-SfsuIdentityFields $Identity $Sid
+    if ($Identity.IdentitySource -eq 'LDAP' -and -not (Test-SfsuProfileVerified $Identity)) { throw 'Directory identity does not match the source profile SID/account evidence.' }
+}
+
+function Assert-SfsuSavedIdentityEvidence($Identity,[string]$Sid) {
+    # Validate historical evidence without claiming a fresh directory lookup.
+    Assert-SfsuIdentityFields $Identity $Sid
 }
 
 function Read-SfsuBackupManifest([string]$Path) {
@@ -537,13 +533,18 @@ function Read-SfsuBackupManifest([string]$Path) {
                 $data.Engine.StoreLength -le 0 -or ($names -join '|') -cne 'Config.xml|MigApp.xml|MigDocs.xml|SfsuPolicy.xml' -or @($data.Engine.PolicyFiles).Count -ne 4 -or
                 $data.Engine.Policy.Efs -cne 'copyraw' -or $data.Engine.Policy.EncryptedStore -isnot [bool] -or $data.Engine.Policy.EncryptedStore) { throw 'Native store has no valid capture/verification/policy evidence.' }
             foreach ($rule in $data.Engine.PolicyFiles) { if ($rule.Sha256 -notmatch '^[A-F0-9]{64}$') { throw 'Invalid native policy hash.' } }
+            if ($data.Engine.PSObject.Properties['Inclusion']) {
+                $inclusion=$data.Engine.Inclusion
+                if ($null -eq $inclusion -or $inclusion.Confirmed -isnot [bool] -or -not $inclusion.Confirmed -or
+                    $inclusion.SourceSid -cne $data.SourceProfile.Sid -or $inclusion.ProfilePath -cne $data.SourceProfile.Path -or
+                    ($inclusion.ProfileFileCount -isnot [int] -and $inclusion.ProfileFileCount -isnot [long]) -or $inclusion.ProfileFileCount -lt 1 -or
+                    $inclusion.EvidenceFile -notmatch '^p[1-9][0-9]*-files\.txt$') { throw 'Invalid intended-user capture-inclusion evidence.' }
+            }
         }
     }
     $identity=$data.Identity | Select-Object *
     $identity | Add-Member NoteProperty IdentitySource $data.Identity.Source
-    $identity | Add-Member NoteProperty IdentityStatus 'Directory verified'
-    $identity | Add-Member NoteProperty ProfileSid $data.SourceProfile.Sid
-    Assert-SfsuIdentityEvidence $identity $data.SourceProfile.Sid
+    Assert-SfsuSavedIdentityEvidence $identity $data.SourceProfile.Sid
     if ([string]::IsNullOrWhiteSpace($data.SourceComputer)) { throw 'Missing source computer.' }
     foreach ($value in @($data.SourceComputer,$data.SourceProfile.Path)) {
         if ($value -isnot [string] -or $value.Length -gt 1024 -or $value -match '[\x00-\x1f]') { throw 'Invalid identity text.' }
