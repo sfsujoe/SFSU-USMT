@@ -39,7 +39,9 @@ function New-SfsuCancellationDialog([string]$Action) {
 
 function Confirm-SfsuMigrationCancellation([string]$Action) {
     $dialog=New-SfsuCancellationDialog $Action
-    try { $dialog.ShowDialog($script:SfsuUi.Form) -eq 'OK' } finally { $dialog.Dispose() }
+    $owner=$script:SfsuUi.Form
+    if ($script:SfsuUi.ProgressWindow -and -not $script:SfsuUi.ProgressWindow.IsDisposed -and $script:SfsuUi.ProgressWindow.Visible) { $owner=$script:SfsuUi.ProgressWindow }
+    try { $dialog.ShowDialog($owner) -eq 'OK' } finally { $dialog.Dispose() }
 }
 
 function New-SfsuLocalRestoreDialog($Plan) {
@@ -48,6 +50,7 @@ function New-SfsuLocalRestoreDialog($Plan) {
     $dialog.StartPosition='CenterParent'; $dialog.Font=$script:SfsuUi.Form.Font
     $heading=New-Object Windows.Forms.Label; $heading.Text='Account: '+$Plan.AccountName+'  |  '+$Plan.DisplayName; $dialog.Controls.Add($heading)
     $explanation=New-Object Windows.Forms.Label; $explanation.Text='Choose a new password and the final account settings. The account is created disabled and stays disabled if restore fails.'; $dialog.Controls.Add($explanation)
+    $requirements=New-Object Windows.Forms.Label; $requirements.Text=[Sfsu.Engine.LocalPasswords]::Requirements+' Password history cannot be checked here; Windows may enforce additional rules.'; $dialog.Controls.Add($requirements)
     $passwordLabel=New-Object Windows.Forms.Label; $passwordLabel.Text='&Password'; $dialog.Controls.Add($passwordLabel)
     $password=New-Object Windows.Forms.TextBox; $password.UseSystemPasswordChar=$true; $password.MaxLength=256; $password.AccessibleName='New local account password'; $dialog.Controls.Add($password)
     $confirmLabel=New-Object Windows.Forms.Label; $confirmLabel.Text='&Confirm password'; $dialog.Controls.Add($confirmLabel)
@@ -61,20 +64,22 @@ function New-SfsuLocalRestoreDialog($Plan) {
     $ok=New-SfsuButton $dialog 'Use these settings' 0 180; $ok.Name='PrimaryAction'
     $cancel=New-SfsuButton $dialog 'Cancel restore' 0 150; $cancel.DialogResult='Cancel'
     $dialog.AcceptButton=$ok; $dialog.CancelButton=$cancel
-    $dialog.Tag=[pscustomobject]@{Password=$password;Confirm=$confirm;Enabled=$enabled;Administrator=$admin;Error=$errorLabel;Options=$null}
+    $dialog.Tag=[pscustomobject]@{Password=$password;Confirm=$confirm;Enabled=$enabled;Administrator=$admin;Error=$errorLabel;Options=$null;AccountName=$Plan.AccountName;DisplayName=$Plan.DisplayName}
     $ok.Add_Click({
         param($sender,$event)
         $window=$sender.FindForm(); $state=$window.Tag
         if (-not $state.Password.Text -or $state.Password.Text -cne $state.Confirm.Text) { $state.Error.Text='Enter a nonempty password and an identical confirmation.'; Update-SfsuDialogLayout $window; return }
         if ($state.Enabled.SelectedIndex -lt 0 -or $state.Administrator.SelectedIndex -lt 0) { $state.Error.Text='Choose whether the account will be enabled and whether it will be an administrator.'; Update-SfsuDialogLayout $window; return }
         $secure=[Net.NetworkCredential]::new('', $state.Password.Text).SecurePassword; $secure.MakeReadOnly()
+        try { $problem=[Sfsu.Engine.LocalPasswords]::Validate($secure,$state.AccountName,$state.DisplayName) } catch { $secure.Dispose(); throw }
+        if ($problem) { $secure.Dispose(); $state.Error.Text=$problem; Update-SfsuDialogLayout $window; return }
         $state.Options=[pscustomobject]@{Password=$secure;Enabled=($state.Enabled.SelectedIndex -eq 1);Administrator=($state.Administrator.SelectedIndex -eq 1)}
         $state.Password.Clear(); $state.Confirm.Clear(); $window.DialogResult='OK'; $window.Close()
     })
     $dialog.Add_FormClosed({param($sender,$event) $sender.Tag.Password.Clear(); $sender.Tag.Confirm.Clear(); if ($sender.DialogResult -ne 'OK' -and $null -ne $sender.Tag.Options) { $sender.Tag.Options.Password.Dispose(); $sender.Tag.Options=$null }})
     $dialog.Add_Disposed({param($sender,$event) if ($null -ne $sender.Tag.Options) { $sender.Tag.Options.Password.Dispose(); $sender.Tag.Options=$null }})
     Initialize-SfsuDialogLayout $dialog @(
-        @{Control=$heading;Kind='Label';Lines=2},@{Control=$explanation;Kind='Label';Lines=2},
+        @{Control=$heading;Kind='Label';Lines=2},@{Control=$explanation;Kind='Label';Lines=2},@{Control=$requirements;Kind='Label';Lines=9},
         @{Control=$passwordLabel;Kind='Label';Lines=1},@{Control=$password;Kind='Input'},@{Control=$confirmLabel;Kind='Label';Lines=1},@{Control=$confirm;Kind='Input'},
         @{Control=$enabledLabel;Kind='Label';Lines=1},@{Control=$enabled;Kind='Input'},@{Control=$adminLabel;Kind='Label';Lines=1},@{Control=$admin;Kind='Input'},@{Control=$errorLabel;Kind='Label';Lines=2;HideWhenEmpty=$true}
     ) @($cancel,$ok)

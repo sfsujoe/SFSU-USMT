@@ -41,13 +41,19 @@ Assert-True ($result.HasWarnings -and $result.WarningLines -eq 1) 'Operational m
 [IO.File]::WriteAllText($log,'2026-11-24 10:00:00, Info [0x000000] Finished.')
 [IO.File]::WriteAllText($progress,'24 Nov 2026,10:00:00,00:00:01,error,UnableToOpen,objectName,"C:\Data\a,b.txt",action,Ignore,numberOfIgnoredErrors,2')
 $result=& $module { param($l,$p) Get-SfsuNativeDiagnostics $l $p 0 } $log $progress
-Assert-True ($result.HasWarnings -and $result.IgnoredErrors -eq 2 -and $result.NonFatalRecords -eq 1) 'Structured skipped-file records and counts flag possible omissions independently of exit code.'
+Assert-True ($result.HasWarnings -and $result.HasOutcomeWarnings -and $result.IgnoredErrors -eq 2 -and $result.NonFatalRecords -eq 1) 'Structured ignored-file counts remain outcome warnings independently of exit code.'
 [IO.File]::WriteAllText($progress,'24 Nov 2026,10:00:00,00:00:01,objectName,"C:\Data\name,error,UnableToCopy.txt",numberOfIgnoredErrors,0')
 $result=& $module { param($l,$p) Get-SfsuNativeDiagnostics $l $p 0 } $log $progress
 Assert-True (-not $result.HasWarnings) 'Error-like words inside a quoted filename cannot fabricate an operational error field.'
+[IO.File]::WriteAllText($log,'2026-11-25 10:00:00, Error [0x0808ff] Printer plug-in failed to load.')
+[IO.File]::WriteAllText($progress,'25 Nov 2026,10:00:00,00:00:01,error,UnableToOpen,action,Abort,errorText,"Will retry using Volume Shadow Copy."'+"`r`n"+'25 Nov 2026,10:00:01,00:00:02,errorCode,0,numberOfIgnoredErrors,0,message,"Successful run"')
+$result=& $module { param($l,$p) Get-SfsuNativeDiagnostics $l $p 0 } $log $progress
+Assert-True ($result.HasWarnings -and -not $result.HasOutcomeWarnings -and $result.ErrorLines -eq 1 -and $result.NonFatalRecords -eq 1) 'Native success retains printer/VSS diagnostics without downgrading the outcome.'
+$result=& $module { param($l,$p) Get-SfsuNativeDiagnostics $l $p 3 } $log $progress
+Assert-True ($result.HasOutcomeWarnings) 'Native exit 3 still changes the outcome.'
 [IO.File]::WriteAllText($progress,'numberOfIgnoredErrors,invalid')
 $result=& $module { param($l,$p) Get-SfsuNativeDiagnostics $l $p 0 } $log $progress
-Assert-True ($result.HasWarnings -and $result.UnavailableDiagnostics.Count -eq 1) 'Unparseable required error evidence is unknown rather than a clean zero.'
+Assert-True ($result.HasWarnings -and $result.HasOutcomeWarnings -and $result.UnavailableDiagnostics.Count -eq 1) 'Unparseable required error evidence is unknown rather than a clean zero.'
 $result=& $module { param($l,$p) Get-SfsuNativeDiagnostics $l $p 0 } $log (Join-Path $root 'absent.log')
 Assert-True ($result.HasWarnings -and $result.UnavailableDiagnostics.Count -eq 1) 'Missing required progress diagnostics cannot silently pass.'
 $result=& $module { param($l) Get-SfsuNativeDiagnostics $l '' 3 } $log

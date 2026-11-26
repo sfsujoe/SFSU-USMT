@@ -65,6 +65,10 @@ try {
   $bytes=[Text.Encoding]::Unicode.GetBytes($line); $progressWriter.Write($bytes,0,$bytes.Length); $progressWriter.Flush()
   $logWriter.WriteByte(65); $logWriter.Flush(); Start-Sleep -Milliseconds 500
  }
+ if ($Mode -eq 'diagnostic') {
+  $bytes=[Text.Encoding]::UTF8.GetBytes("`r`n2026-11-25 10:00:00, Error [0x0808ff] Printer plug-in failed to load.`r`n"); $logWriter.Write($bytes,0,$bytes.Length); $logWriter.Flush()
+  $bytes=[Text.Encoding]::Unicode.GetBytes("25 Nov 2026,10:00:00,00:00:01,error,UnableToOpen,action,Abort,errorText,Will retry using Volume Shadow Copy.`r`n25 Nov 2026,10:00:01,00:00:02,errorCode,0,numberOfIgnoredErrors,0,message,Successful run`r`n"); $progressWriter.Write($bytes,0,$bytes.Length); $progressWriter.Flush()
+ }
  [IO.File]::WriteAllText($Marker,'finished naturally')
 } finally { if ($reportReader) { $reportReader.Dispose() }; if ($progressWriter) { $progressWriter.Dispose() }; if ($logWriter) { $logWriter.Dispose() } }
 exit $Code
@@ -89,7 +93,7 @@ exit $Code
         $process
     }
 } $helper
-foreach ($mode in @('normal','exclusive','report-blocked','persistent-report','fatal','cancel')) {
+foreach ($mode in @('normal','diagnostic','exclusive','report-blocked','persistent-report','fatal','cancel')) {
     $run=New-SfsuLogRun -PackageRoot $root -Operation Backup -Steps @(@{Id='capture';Title=('Supervised '+$mode+' writer')})
     Start-SfsuLogStep $run capture
     $control=[hashtable]::Synchronized(@{CancelRequested=$false;Message='';Percent=-1})
@@ -119,6 +123,7 @@ foreach ($mode in @('normal','exclusive','report-blocked','persistent-report','f
     } else {
         Assert-True (-not $failure -and $result.ExitCode -eq 0 -and (Test-Path -LiteralPath $case.Marker)) ('Live observation/rendering does not terminate a successful native writer. '+$mode+': '+$failure)
         if ($mode -eq 'normal') { Assert-True (-not $result.HasWarnings) 'Compatible log writers do not introduce spurious observation warnings.' }
+        elseif ($mode -eq 'diagnostic') { Assert-True ($result.HasWarnings -and -not $result.HasOutcomeWarnings) 'A successful supervised child retains diagnostic-only printer/VSS warnings.' }
         else {
             Assert-True ($result.HasWarnings) 'An unavailable progress read or HTML refresh propagates a truthful warning.'
             Assert-True ([IO.File]::ReadAllText($run.EventsPath).Contains('Progress/report observation failed while the native process continued')) 'Observation failure is durably recorded once result recording is available.'
@@ -127,7 +132,8 @@ foreach ($mode in @('normal','exclusive','report-blocked','persistent-report','f
         Complete-SfsuLogRun $run Completed 'Synthetic writer only.' | Out-Null
         $html=[IO.File]::ReadAllText($run.ReportPath)
         Assert-True ($html.Contains('href="Raw/native.log"') -and $html.Contains('href="Raw/progress.log"')) 'Final reports retain original native/progress links after writers close.'
-        if ($mode -ne 'normal') { Assert-True ($html.Contains('Completed with warnings')) 'Reporting limitations cannot produce a clean-success result.' }
+        if ($mode -eq 'diagnostic') { Assert-True ($html.Contains('id="outcome">Completed</h2>') -and $html.Contains('! WARNING (diagnostic)')) 'The real native-adapter/reporting path shows Completed while keeping diagnostic warnings visible.' }
+        elseif ($mode -ne 'normal') { Assert-True ($html.Contains('Completed with warnings')) 'Reporting limitations cannot produce a clean-success result.' }
     }
 }
 Write-Output ("PASS: $script:Assertions live-native-reporting assertions on PowerShell "+$PSVersionTable.PSVersion)

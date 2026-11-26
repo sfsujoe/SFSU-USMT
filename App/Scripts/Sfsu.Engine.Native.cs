@@ -6,10 +6,53 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.Principal;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Globalization;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
 namespace Sfsu.Engine {
+ // Local prevalidation only. Windows still enforces its effective policy;
+ // recreated accounts have no accessible source password history to compare.
+ public static class LocalPasswords {
+  public const string Requirements="Use 12-256 characters and at least 3 categories: uppercase, lowercase, digits, special characters, or uncased Unicode letters. Do not include the account name or any part of the display name.";
+  static readonly Regex Special=new Regex("[!\"#$%&'()*+,./:;<=>?@\\[\\]\\\\^_`{|}~\\-]",RegexOptions.CultureInvariant);
+  static readonly Regex NameParts=new Regex(@"[\s,.\-_#]+",RegexOptions.CultureInvariant);
+  static bool Contains(char[] candidate,string value) {
+   if(String.IsNullOrEmpty(value) || value.Length>candidate.Length) return false;
+   for(int start=0;start<=candidate.Length-value.Length;start++) {
+    int offset=0;
+    while(offset<value.Length && Char.ToUpperInvariant(candidate[start+offset])==Char.ToUpperInvariant(value[offset])) offset++;
+    if(offset==value.Length) return true;
+   }
+   return false;
+  }
+  public static string Validate(SecureString password,string accountName,string displayName) {
+   if(password==null || password.Length==0 || password.Length>256) return "Enter a password of 12-256 characters.";
+   IntPtr secret=IntPtr.Zero; char[] candidate=new char[password.Length];
+   try {
+    secret=Marshal.SecureStringToGlobalAllocUnicode(password); Marshal.Copy(secret,candidate,0,candidate.Length);
+    bool upper=false,lower=false,digit=false,special=false,uncased=false; int count=0;
+    for(int i=0;i<candidate.Length;i++) {
+     // Only one Unicode scalar reaches regex/category APIs, never the password.
+     int width=Char.IsHighSurrogate(candidate[i]) && i+1<candidate.Length && Char.IsLowSurrogate(candidate[i+1]) ? 2 : 1;
+     string scalar=new string(candidate,i,width); UnicodeCategory category=CharUnicodeInfo.GetUnicodeCategory(scalar,0);
+     if(category==UnicodeCategory.Control || category==UnicodeCategory.Surrogate) return "Passwords cannot contain control characters or invalid Unicode.";
+     upper|=category==UnicodeCategory.UppercaseLetter; lower|=category==UnicodeCategory.LowercaseLetter;
+     digit|=candidate[i]>='0' && candidate[i]<='9'; special|=Special.IsMatch(scalar);
+     uncased|=category==UnicodeCategory.TitlecaseLetter || category==UnicodeCategory.ModifierLetter || category==UnicodeCategory.OtherLetter;
+     count++; i+=width-1;
+    }
+    if(count<12) return "Use at least 12 characters.";
+    if((upper?1:0)+(lower?1:0)+(digit?1:0)+(special?1:0)+(uncased?1:0)<3) return "Use at least 3 character categories: uppercase, lowercase, digits, special characters, or uncased Unicode letters.";
+    if(Contains(candidate,accountName)) return "The password must not contain the account name (ignoring case).";
+    foreach(string part in NameParts.Split(displayName ?? "")) {
+     if(Contains(candidate,part)) return "The password must not contain a display-name part (ignoring case).";
+    }
+    return "";
+   } finally { Array.Clear(candidate,0,candidate.Length); if(secret!=IntPtr.Zero) Marshal.ZeroFreeGlobalAllocUnicode(secret); }
+  }
+ }
  public static class Locations {
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint mode,uint flags,IntPtr template);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFinalPathNameByHandle(SafeFileHandle file,StringBuilder name,uint length,uint flags);

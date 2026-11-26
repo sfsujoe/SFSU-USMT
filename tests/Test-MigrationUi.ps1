@@ -24,11 +24,16 @@ try {
         param($sender,$event)
         $state=$sender.Tag
         $sender.AcceptButton.PerformClick(); Assert-True ($state.Error.Text -match 'nonempty') 'Empty passwords cannot advance.'
-        $state.Password.Text='Synthetic-Password!19'; $state.Confirm.Text='different'
+        $state.Password.Text='Harbor-Password!19'; $state.Confirm.Text='different'
         $sender.AcceptButton.PerformClick(); Assert-True ($state.Error.Text -match 'identical') 'Mismatched password confirmation cannot advance.'
         $state.Confirm.Text=$state.Password.Text
         $sender.AcceptButton.PerformClick(); Assert-True ($state.Error.Text -match 'Choose whether') 'A password alone cannot silently choose account enablement.'
         $state.Enabled.SelectedIndex=0
+        $state.Password.Text='Short!9'; $state.Confirm.Text=$state.Password.Text
+        $sender.AcceptButton.PerformClick(); Assert-True ($state.Error.Text -match '12 characters' -and $null -eq $state.Options) 'Short passwords stay in the dialog with an actionable error.'
+        $state.Password.Text='SYNTHETICLOCAL!19'; $state.Confirm.Text=$state.Password.Text
+        $sender.AcceptButton.PerformClick(); Assert-True ($state.Error.Text -match 'account name' -and $null -eq $state.Options) 'An account-name match cannot advance the dialog.'
+        $state.Password.Text='Harbor-Password!19'; $state.Confirm.Text=$state.Password.Text
         Save-Dialog $sender 'local-account-normal.png'
         $sender.AcceptButton.PerformClick()
     })
@@ -43,7 +48,7 @@ try {
     Assert-Throws { $secret.Copy() } 'The transferred SecureString is disposed during cleanup.'
 
     $dialog=New-SfsuLocalRestoreDialog $plan
-    $dialog.Add_Shown({param($sender,$event) $sender.Tag.Password.Text='Another-Synthetic!42'; $sender.Tag.Confirm.Text=$sender.Tag.Password.Text; $sender.Tag.Enabled.SelectedIndex=1; $sender.Tag.Administrator.SelectedIndex=1; $sender.AcceptButton.PerformClick()})
+    $dialog.Add_Shown({param($sender,$event) $sender.Tag.Password.Text='Another-Harbor!42'; $sender.Tag.Confirm.Text=$sender.Tag.Password.Text; $sender.Tag.Enabled.SelectedIndex=1; $sender.Tag.Administrator.SelectedIndex=1; $sender.AcceptButton.PerformClick()})
     try { [void]$dialog.ShowDialog($main); Assert-True ($dialog.Tag.Options.Enabled -and $dialog.Tag.Options.Administrator) 'Enabled/administrator choices are supported separately for each account.' } finally { $dialog.Dispose() }
     $dialog=New-SfsuLocalRestoreDialog $plan
     $dialog.Add_Shown({param($sender,$event) $sender.Tag.Password.Text='Cancel-Synthetic!55'; $sender.Tag.Confirm.Text=$sender.Tag.Password.Text; $sender.CancelButton.PerformClick()})

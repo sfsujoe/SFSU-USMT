@@ -30,7 +30,7 @@ $reviews=@((New-Review $local),(New-Review $domain))
     param($root,$profiles)
     $script:FixtureRoot=$root; $script:Sources=$profiles; $script:Calls=New-Object Collections.Generic.List[object]
     $script:Destinations=@(); $script:Accounts=@{}; $script:Mutations=New-Object Collections.Generic.List[string]
-    $script:FailName=''; $script:CancelOnCapture=$false; $script:WarnCapture=$false; $script:CollideName=''; $script:AccountFailure=$false; $script:EmptyFileList=$false
+    $script:FailName=''; $script:CancelOnCapture=$false; $script:WarnCapture=$false; $script:WarnRestore=$false; $script:WarningExitCode=0; $script:CollideName=''; $script:AccountFailure=$false; $script:EmptyFileList=$false
     function script:Assert-SfsuMigrationHost([string]$Operation) { [pscustomobject]@{Build=26100;ProductType=1;Version='10.0.26100';Architecture='amd64';Computer='Synthetic'} }
     function script:Get-SfsuToolset([string]$PackageRoot,[string]$Architecture) { [pscustomobject]@{Directory=(Join-Path $script:FixtureRoot 'Toolset');Architecture='amd64';Version='10.0.26100.9457';Files=@()} }
     function script:Get-CimInstance { param($ClassName); $script:Sources | ForEach-Object { [pscustomobject]@{SID=$_.ProfileSid;LocalPath=$_.ProfilePath;Loaded=$_.Loaded;Special=$false} } }
@@ -72,13 +72,13 @@ $reviews=@((New-Review $local),(New-Review $domain))
             }
         } elseif ($Name -eq 'loadstate.exe') {
             $map=@($Arguments | Where-Object { $_.StartsWith('/mu:') })
-            if ($map.Count) { $name=(($map[0].Substring(4) -split ':',2)[1] -split '\\')[-1]; $sid=$script:Accounts[$name].Sid }
+            if ($map.Count) { $accountName=(($map[0].Substring(4) -split ':',2)[1] -split '\\')[-1]; $sid=$script:Accounts[$accountName].Sid }
             else { $sid=($Arguments | Where-Object { $_ -match '^/ui:S-1-5-21-\d+-\d+-\d+-\d+$' } | Select-Object -First 1).Substring(4) }
             $script:Destinations+=([pscustomobject]@{SID=$sid;LocalPath=(Join-Path $script:FixtureRoot ('Destination/'+$sid));Loaded=$false})
         }
-        $warn=$script:WarnCapture -and $Name -eq 'scanstate.exe' -and -not $config.Count
-        if ($warn) { Write-SfsuLogEvent -Run $Run -StepId $StepId -Severity WARNING -Message 'Synthetic native warning.' }
-        [pscustomobject]@{ExitCode=0;HasWarnings=$warn;ErrorLines=0;WarningLines=0;NonFatalRecords=0}
+        $warn=($script:WarnCapture -and $Name -eq 'scanstate.exe' -and -not $config.Count) -or ($script:WarnRestore -and $Name -eq 'loadstate.exe')
+        $code=0; if ($warn) { $code=$script:WarningExitCode; Write-SfsuLogEvent -Run $Run -StepId $StepId -Severity WARNING -DiagnosticOnly:($code -eq 0) -Message 'Synthetic native warning.' }
+        [pscustomobject]@{ExitCode=$code;HasWarnings=$warn;HasOutcomeWarnings=($code -eq 3);ErrorLines=0;WarningLines=0;NonFatalRecords=0}
     }
 } $root @($local,$domain)
 
@@ -95,14 +95,18 @@ Assert-Throws { Set-SfsuCaptureLocations $badReview '' '' $false } 'Confirm' 'Cl
 Set-SfsuCaptureLocations $badReview 'D:\Cloud & Files' 'Chrome|D:\Browser Profiles' $true | Out-Null
 Assert-True ($badReview.Reviewed -and $badReview.AdditionalCloudRoots.Count -eq 1 -and $badReview.AdditionalBrowserRoots[0].Browser -eq 'Chrome') 'Per-profile custom cloud/browser paths retain exact literal locations.'
 
-$capture=Invoke-SfsuCapture -PackageRoot $root -Reviews $reviews
+$captureControl=[hashtable]::Synchronized(@{CancelRequested=$false;Message='';Percent=-1})
+$capture=Invoke-SfsuCapture -PackageRoot $root -Reviews $reviews -Control $captureControl
 Assert-True ($capture.Outcome -eq 'Completed' -and $capture.Errors.Count -eq 0 -and $capture.Paths.Count -eq 2) 'A clean synthetic multi-profile capture completes without routine acceptance warnings.'
+Assert-True ($captureControl.ProgressSnapshot.Outcome -eq 'Completed' -and $captureControl.ProgressSnapshot.OverallPercent -eq 100 -and $captureControl.Workflow.Weights.Count -eq 2) 'Capture publishes size-weighted terminal progress only after verification and reporting.'
 $catalog=@(Get-SfsuBackupCatalog $root)
 Assert-True ($catalog.Count -eq 2 -and @($catalog | Where-Object Status -eq 'Captured - store verified').Count -eq 2) 'Verified native captures have a readable store-verification status in the catalog.'
 $manifest=(Read-SfsuBackupManifest $capture.Paths[0]).Data
 Assert-True ($manifest.SchemaVersion -eq 4 -and $manifest.HasMigrationData -and $manifest.Engine.VerifyExitCode -eq 0 -and -not $manifest.Engine.EfsDecryptionVerified) 'Metadata records structural verification without inventing EFS decryption evidence.'
 Assert-True ($manifest.Engine.Inclusion.Confirmed -and $manifest.Engine.Inclusion.ProfileFileCount -eq 1 -and $manifest.Engine.Inclusion.SourceSid -eq $local.ProfileSid) 'Positive selected-profile file evidence is saved separately from store integrity.'
 $calls=@(& $module { $script:Calls.ToArray() })
+$firstCapture=0; while ($firstCapture -lt $calls.Count -and -not @($calls[$firstCapture].Arguments | Where-Object { $_ -like '/listfiles:*' }).Count) { $firstCapture++ }
+Assert-True (@($calls[0..($firstCapture-1)] | Where-Object { @($_.Arguments | Where-Object { $_ -like '/p:*' }).Count }).Count -eq 2) 'Every selected profile is estimated before the first capture so size weights stay stable.'
 $scan=@($calls | Where-Object { $_.Name -eq 'scanstate.exe' -and $_.Label -like 'Capturing*' })
 Assert-True ($scan.Count -eq 2 -and @($scan[0].Arguments | Where-Object { $_ -eq '/efs:copyraw' }).Count -eq 1 -and $scan[0].Arguments -contains '/r:2' -and $scan[0].Arguments -contains '/w:3') 'Capture uses native EFS raw preservation and bounded native retries.'
 Assert-True (@($calls.Arguments | Where-Object { $_ -match '^/(o|encrypt|key|lac|lae)(:|$)' }).Count -eq 0) 'Capture never overwrites stores, encrypts them or passes account/key secrets.'
@@ -117,8 +121,15 @@ Assert-True ($config.SelectNodes('/Configuration/Policies/ErrorControl/fileError
 $plans=@(& $module { param($root,$backups) Get-SfsuRestorePlans $root $backups } $root $catalog)
 $localPlan=@($plans | Where-Object AccountType -eq 'Local')[0]
 $domainPlan=@($plans | Where-Object AccountType -eq 'Domain')[0]
-$secure=[Net.NetworkCredential]::new('','Synthetic-only-Password!29').SecurePassword
+$secure=[Net.NetworkCredential]::new('','Harbor-only-Password!29').SecurePassword
 foreach ($plan in $plans) { if ($plan.AccountType -eq 'Local') { $plan.LocalOptions=[pscustomobject]@{Password=$secure;Enabled=$true;Administrator=$false} } }
+$weak=[Net.NetworkCredential]::new('','Short!9').SecurePassword
+try {
+    $localPlan.LocalOptions.Password=$weak
+    $before=(& $module { $script:Calls.Count })
+    $blocked=Invoke-SfsuRestore -PackageRoot $root -Backups $plans
+    Assert-True ($blocked.Outcome -eq 'Failed' -and ($blocked.Errors -join ' ') -match '12 characters' -and (& $module { $script:Mutations.Count }) -eq 0 -and (& $module { $script:Calls.Count }) -eq $before) 'A weak local password fails whole-batch preflight before native work or any account/data mutation.'
+} finally { $localPlan.LocalOptions.Password=$secure; $weak.Dispose() }
 & $module { $script:CollideName='LocalOne' }
 $before=(& $module { $script:Calls.Count })
 $blocked=Invoke-SfsuRestore -PackageRoot $root -Backups $plans
@@ -133,20 +144,38 @@ Assert-True ($blocked.Outcome -eq 'Failed' -and (& $module { $script:Mutations.C
 $blocked=Invoke-SfsuRestore -PackageRoot $root -Backups $plans
 Assert-True ($blocked.Outcome -eq 'Failed' -and (& $module { $script:Mutations.Count }) -eq 0) 'Failed pre-restore store verification prevents every account/data mutation.'
 & $module { $script:FailName='' }
-$restore=Invoke-SfsuRestore -PackageRoot $root -Backups $plans
+$restoreControl=[hashtable]::Synchronized(@{CancelRequested=$false;Message='';Percent=-1})
+$restore=Invoke-SfsuRestore -PackageRoot $root -Backups $plans -Control $restoreControl
 Assert-True ($restore.Outcome -eq 'Completed' -and $restore.Errors.Count -eq 0) 'Clean synthetic mixed local/domain restore completes without routine acceptance warnings.'
+Assert-True ($restoreControl.ProgressSnapshot.Outcome -eq 'Completed' -and $restoreControl.ProgressSnapshot.OverallPercent -eq 100) 'Restore reaches 100 only after account finalization and report handling.'
 $calls=@(& $module { $script:Calls.ToArray() })
 $loads=@($calls | Where-Object Name -eq 'loadstate.exe')
 Assert-True ($loads.Count -eq 2 -and @($loads | Where-Object { $_.Arguments -match '^/mu:' }).Count -eq 1) 'Only local recreation uses a same-name local mapping; domain identity has no remapping.'
-Assert-True (@($loads.Arguments | Where-Object { $_ -match '^/(lac|lae|md)(:|$)' -or $_.Contains('Synthetic-only-Password') }).Count -eq 0) 'No password, /lac, /lae or different-domain mapping enters LoadState arguments.'
+Assert-True (@($loads.Arguments | Where-Object { $_ -match '^/(lac|lae|md)(:|$)' -or $_.Contains('Harbor-only-Password') }).Count -eq 0) 'No password, /lac, /lae or different-domain mapping enters LoadState arguments.'
 Assert-True ((& $module { $script:Accounts['LocalOne'].Enabled }) -and -not (& $module { $script:Accounts['LocalOne'].Administrator })) 'Per-account enabled and standard-user choices are applied after restoration.'
 $events=[IO.File]::ReadAllText((Join-Path $restore.RunDirectory 'events.jsonl'))
-Assert-True (-not $events.Contains('Synthetic-only-Password!29') -and $events.Contains('Enabled=True; Administrators member=False')) 'Reports record final account choices while excluding the password.'
+Assert-True (-not $events.Contains('Harbor-only-Password!29') -and $events.Contains('Enabled=True; Administrators member=False')) 'Reports record final account choices while excluding the password.'
 Assert-True (-not $events.Contains('EFS-file decryption') -and -not $events.Contains('"Severity":"WARNING"')) 'Clean results have no unconditional EFS/sign-in acceptance warnings.'
 Assert-True ($events.Contains('DisabledAccountCreated') -and $events.Contains('S-1-5-21-44-55-66-1001') -and $events.Contains('ProfileRegistrationConfirmed')) 'Destination SIDs and per-profile stages are durable in the run journal.'
 
 $metadataPath=Join-Path $localPlan.Path 'backup.json'; $originalMetadata=[IO.File]::ReadAllText($metadataPath)
 try {
+    $historical=ConvertFrom-Json $originalMetadata; $historical.Status='CapturedWithWarnings'; $historical.Engine.CaptureWarnings=$true
+    $historical.Engine.PSObject.Properties.Remove('OutcomeWarnings'); $historical.Engine.PSObject.Properties.Remove('DiagnosticWarnings')
+    [IO.File]::WriteAllText($metadataPath,(ConvertTo-Json $historical -Depth 20))
+    & $module { $script:Destinations=@(); $script:Accounts=@{} }
+    $historicalRestore=Invoke-SfsuRestore -PackageRoot $root -Backups @($localPlan)
+    Assert-True ($historicalRestore.Outcome -eq 'Completed' -and [IO.File]::ReadAllText((Join-Path $historicalRestore.RunDirectory 'events.jsonl')).Contains('"DiagnosticOnly":true')) 'Historical warning status with successful capture/verification is retained as diagnostic history during a successful new restore.'
+    $historical.Engine.CaptureExitCode=3
+    [IO.File]::WriteAllText($metadataPath,(ConvertTo-Json $historical -Depth 20))
+    & $module { $script:Destinations=@(); $script:Accounts=@{} }
+    $historicalWarningRestore=Invoke-SfsuRestore -PackageRoot $root -Backups @($localPlan)
+    Assert-True ($historicalWarningRestore.Outcome -eq 'CompletedWithWarnings') 'A historical native warning exit remains visible as an outcome warning.'
+    $historical.Engine.CaptureExitCode=0; $historical.Engine | Add-Member NoteProperty OutcomeWarnings $true
+    [IO.File]::WriteAllText($metadataPath,(ConvertTo-Json $historical -Depth 20))
+    & $module { $script:Destinations=@(); $script:Accounts=@{} }
+    $requiredEvidenceRestore=Invoke-SfsuRestore -PackageRoot $root -Backups @($localPlan)
+    Assert-True ($requiredEvidenceRestore.Outcome -eq 'CompletedWithWarnings') 'A saved required-evidence warning is not reclassified as diagnostic-only merely because native exits were zero.'
     $older=ConvertFrom-Json $originalMetadata; $older.Engine.PSObject.Properties.Remove('Inclusion')
     [IO.File]::WriteAllText($metadataPath,(ConvertTo-Json $older -Depth 20))
     & $module { $script:Destinations=@(); $script:Accounts=@{} }
@@ -202,9 +231,21 @@ $warningProfile=New-Profile WarningCapture 6001
 & $module { param($profile) $script:Sources=@($profile); $script:WarnCapture=$true } $warningProfile
 $warningCapture=Invoke-SfsuCapture -PackageRoot $root -Reviews @((New-Review $warningProfile))
 $warningManifest=(Read-SfsuBackupManifest $warningCapture.Paths[0]).Data
-Assert-True ($warningCapture.Outcome -eq 'CompletedWithWarnings' -and $warningCapture.Errors.Count -eq 0 -and $warningManifest.Status -eq 'CapturedWithWarnings') 'Operational capture warnings preserve verified data without turning successful completion into failure.'
+Assert-True ($warningCapture.Outcome -eq 'Completed' -and $warningCapture.Errors.Count -eq 0 -and $warningManifest.Status -eq 'CapturedVerified' -and $warningManifest.Engine.DiagnosticWarnings) 'Exit-zero diagnostic warnings retain evidence while successful capture and verification report Completed.'
 $warningEvents=Get-Content -LiteralPath (Join-Path $warningCapture.RunDirectory 'events.jsonl') | ForEach-Object { ConvertFrom-Json $_ }
-Assert-True ($warningEvents[-1].Data.Outcome -eq 'CompletedWithWarnings') 'The logger derives completed-with-warnings from recorded operational evidence.'
+Assert-True ($warningEvents[-1].Data.Outcome -eq 'Completed' -and @($warningEvents | Where-Object { $_.Severity -eq 'WARNING' -and $_.Data.DiagnosticOnly }).Count -gt 0) 'Diagnostic warnings stay in the completed capture report and journal.'
+& $module { $script:WarnCapture=$false; $script:WarnRestore=$true; $script:Destinations=@(); $script:Accounts=@{}; $script:Mutations.Clear() }
+$warningPlan=@(Invoke-SfsuRestorePlanning -PackageRoot $root -Backups @([pscustomobject]@{Path=$warningCapture.Paths[0]})).Plans
+$warningPlan[0].LocalOptions=[pscustomobject]@{Password=$secure;Enabled=$true;Administrator=$false}
+$diagnosticRestore=Invoke-SfsuRestore -PackageRoot $root -Backups $warningPlan
+$diagnosticEvents=Get-Content -LiteralPath (Join-Path $diagnosticRestore.RunDirectory 'events.jsonl') | ForEach-Object { ConvertFrom-Json $_ }
+Assert-True ($diagnosticRestore.Outcome -eq 'Completed' -and $diagnosticEvents[-1].Data.Outcome -eq 'Completed' -and @($diagnosticEvents | Where-Object { $_.Severity -eq 'WARNING' -and $_.Data.DiagnosticOnly }).Count -gt 0) 'Exit-zero restore diagnostics also remain available without changing Completed.'
+& $module { $script:WarnRestore=$false; $script:WarnCapture=$true; $script:WarningExitCode=3 }
+$nativeWarningProfile=New-Profile NativeWarning 6002
+& $module { param($profile) $script:Sources=@($profile) } $nativeWarningProfile
+$nativeWarning=Invoke-SfsuCapture -PackageRoot $root -Reviews @((New-Review $nativeWarningProfile))
+Assert-True ($nativeWarning.Outcome -eq 'CompletedWithWarnings' -and (Read-SfsuBackupManifest $nativeWarning.Paths[0]).Data.Status -eq 'CapturedWithWarnings') 'Native warning exit code 3 remains CompletedWithWarnings.'
+& $module { $script:WarningExitCode=0 }
 & $module { $script:WarnCapture=$false }
 
 # Cancel during capture: metadata must stay non-restorable and the source sentinel
@@ -214,6 +255,7 @@ $cancelProfile=New-Profile CancelOne 3001; $sentinel=Join-Path $cancelProfile.Pr
 $control=[hashtable]::Synchronized(@{CancelRequested=$false;Message='';Percent=-1})
 $cancelled=Invoke-SfsuCapture -PackageRoot $root -Reviews @((New-Review $cancelProfile)) -Control $control
 Assert-True ($cancelled.Outcome -eq 'Cancelled' -and $cancelled.Paths.Count -eq 1) 'Cooperative cancellation is recorded as Cancelled.'
+Assert-True ($control.ProgressSnapshot.Outcome -eq 'Cancelled' -and $control.ProgressSnapshot.OverallPercent -lt 100) 'Cancelled engine work publishes a stopped outcome rather than a successful pie.'
 $cancelManifest=(Read-SfsuBackupManifest $cancelled.Paths[0]).Data
 Assert-True ($cancelManifest.Status -eq 'CaptureCancelled' -and -not $cancelManifest.HasMigrationData -and [IO.File]::ReadAllText($sentinel) -eq 'preserve source') 'Cancelled capture keeps its evidence and leaves source content untouched.'
 $secure.Dispose()

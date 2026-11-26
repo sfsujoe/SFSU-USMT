@@ -365,13 +365,23 @@ function Start-SfsuLogStep {
     Add-SfsuEvent -Run $Run -Type StepStarted -StepId $StepId -Message 'Step started.'
 }
 
+function Test-SfsuDiagnosticOnlyEvent($Event) {
+    if ($Event.Type -ne 'Message' -or $Event.Severity -ne 'WARNING' -or $null -eq $Event.Data) { return $false }
+    $flag=$null
+    if ($Event.Data -is [Collections.IDictionary]) { if ($Event.Data.Contains('DiagnosticOnly')) { $flag=$Event.Data['DiagnosticOnly'] } }
+    elseif ($Event.Data.PSObject.Properties['DiagnosticOnly']) { $flag=$Event.Data.DiagnosticOnly }
+    ($flag -is [bool] -and $flag)
+}
+
 function Write-SfsuLogEvent {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Run, [string]$StepId = '',
         [ValidateSet('INFO','WARNING','ERROR')][string]$Severity = 'INFO',
-        [Parameter(Mandatory)][string]$Message, [string]$NextAction = '', [string]$Details = '')
+        [Parameter(Mandatory)][string]$Message, [string]$NextAction = '', [string]$Details = '', [switch]$DiagnosticOnly)
+    if ($DiagnosticOnly -and $Severity -ne 'WARNING') { throw 'DiagnosticOnly applies only to retained warning messages, never errors or checkpoints.' }
     [void](Assert-SfsuWritableRun $Run $StepId)
-    Add-SfsuEvent -Run $Run -Type Message -StepId $StepId -Severity $Severity -Message $Message -NextAction $NextAction -Details $Details
+    $data=@{}; if ($DiagnosticOnly) { $data.DiagnosticOnly=$true }
+    Add-SfsuEvent -Run $Run -Type Message -StepId $StepId -Severity $Severity -Message $Message -NextAction $NextAction -Details $Details -Data $data
 }
 
 function Write-SfsuCheckpoint {
@@ -400,7 +410,7 @@ function Complete-SfsuLogStep {
     if ($state.Finished.Count -gt 0) { throw 'This step has already ended.' }
     if ($Status -ne 'Skipped' -and $state.Started.Count -eq 0) { throw 'Start the step before completing it.' }
     if ($Status -eq 'Passed') {
-        $stepEvents = @($journal.Events | Where-Object StepId -eq $StepId)
+        $stepEvents = @($journal.Events | Where-Object { $_.StepId -eq $StepId -and -not (Test-SfsuDiagnosticOnlyEvent $_) })
         if (@($stepEvents | Where-Object Severity -eq 'ERROR').Count -gt 0) { $Status = 'Failed' }
         elseif (@($stepEvents | Where-Object Severity -eq 'WARNING').Count -gt 0) { $Status = 'Warning' }
     }
@@ -425,7 +435,7 @@ function Complete-SfsuLogRun {
             }
         }
         if (@($journal.Events | Where-Object Severity -eq 'ERROR').Count -gt 0) { $resolvedOutcome = 'Failed' }
-        elseif (@($journal.Events | Where-Object Severity -eq 'WARNING').Count -gt 0) { $resolvedOutcome = 'CompletedWithWarnings' }
+        elseif (@($journal.Events | Where-Object { $_.Severity -eq 'WARNING' -and -not (Test-SfsuDiagnosticOnlyEvent $_) }).Count -gt 0) { $resolvedOutcome = 'CompletedWithWarnings' }
     }
     $severity = 'INFO'
     if ($resolvedOutcome -eq 'Failed') { $severity = 'ERROR' }
@@ -506,6 +516,7 @@ function Update-SfsuLogReport {
         if ($event.StepId) { $title = $stepTitles[$event.StepId] }
         $severityText = $event.Severity
         if ($event.Severity -in @('ERROR','WARNING')) { $severityText = '! ' + $severityText }
+        if (Test-SfsuDiagnosticOnlyEvent $event) { $severityText+=' (diagnostic)' }
         $severityText = ConvertTo-SfsuHtml $severityText
         $details = ''
         if ($event.Details) { $details = '<details><summary>Technical details</summary><pre>' + (ConvertTo-SfsuHtml $event.Details) + '</pre></details>' }

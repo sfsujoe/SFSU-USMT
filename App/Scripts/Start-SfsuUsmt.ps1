@@ -11,13 +11,15 @@ param(
     [ValidateRange(1,3650)][int]$LogRetentionDays=30,
     [switch]$PreviewLogRetention,
     [switch]$ApplyLogRetention,
-    [switch]$BuildUiOnly
+    [switch]$BuildUiOnly,
+    [Parameter(DontShow)][hashtable]$StartupSignIn
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $packageRoot = ''
 $script:CurrentRun = $null
+$script:SfsuStartupSignIn=$null
 $guiRequested = -not ($Headless -or $DiscoverProfiles -or $RebuildReport -or $BuildUiOnly -or $ReviewStorageAccess -or $PreviewLogRetention -or $ApplyLogRetention -or $SnapshotBackupPath)
 
 function Get-SfsuStartupRestriction([string]$LanguageMode,[string]$ExecutionPolicy) {
@@ -108,14 +110,22 @@ try {
         Import-Module (Join-Path $PSScriptRoot 'Sfsu.Launch.psm1') -Force
         if (-not (Test-SfsuAdministrator)) {
             $elevatedExit=Start-SfsuElevatedGui -EntryPath $PSCommandPath -LdapServer $LdapServer -Scenario $Scenario
+            if ($elevatedExit -eq 79) { exit 1 } # Bootstrap already displayed its startup failure.
             if ($elevatedExit -ne 0) {
                 throw "The elevated app exited with code $elevatedExit. Check that the administrator account can read the toolkit and access its Logs and Backups folders. Run the entry script from an elevated console for startup or policy diagnostics."
             }
             exit 0
         }
+        # A bootstrap-created SecureString is handed over only within this same
+        # elevated process. It never appears in the UAC command line or a file.
+        if ($null -eq $StartupSignIn) { $StartupSignIn=Get-SfsuStartupSignIn $PSCommandPath }
+        $script:SfsuStartupSignIn=$StartupSignIn
     }
     $elevationPending=$false
     Import-Module (Join-Path $PSScriptRoot 'Sfsu.Logging.psm1') -Force
+    if ($guiRequested) {
+        $script:SfsuStartupSignIn=Complete-SfsuStartupSignIn $script:SfsuStartupSignIn $PSCommandPath $packageRoot $LdapServer
+    }
     if ($ReviewStorageAccess -or $PreviewLogRetention -or $ApplyLogRetention) {
         if ($DiscoverProfiles -or $Headless -or $RebuildReport -or $BuildUiOnly -or $DirectoryCredential -or $SnapshotBackupPath) { throw 'Run package maintenance separately from application actions.' }
         Import-Module (Join-Path $PSScriptRoot 'Sfsu.Maintenance.psm1') -Force
@@ -163,4 +173,9 @@ try {
         catch { [Console]::Error.WriteLine('Could not display the startup error dialog.') }
     }
     exit 1
+} finally {
+    if ($null -ne $script:SfsuStartupSignIn) {
+        if ($null -ne $script:SfsuStartupSignIn.Credential) { $script:SfsuStartupSignIn.Credential.Password.Dispose(); $script:SfsuStartupSignIn.Credential=$null }
+        $script:SfsuStartupSignIn=$null
+    }
 }

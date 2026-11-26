@@ -77,6 +77,21 @@ Complete-SfsuLogStep -Run $warning -StepId capture -Status Passed -Message 'Samp
 Complete-SfsuLogRun -Run $warning -Outcome Completed -Message 'Finished with a warning.' | Out-Null
 Assert-True ((Read-Report $warning).Contains('id="outcome">Completed with warnings</h2>')) 'Warnings propagate to the overall result.'
 Assert-True ((Read-Report $warning).Contains('class="step warning"')) 'Warnings cannot be hidden by a Passed step.'
+
+$diagnostic = New-TestRun
+Start-SfsuLogStep -Run $diagnostic -StepId access
+Write-SfsuLogEvent -Run $diagnostic -StepId access -Severity WARNING -DiagnosticOnly -Message 'Native exit zero: retained printer diagnostic.'
+Assert-Throws { Write-SfsuLogEvent -Run $diagnostic -StepId access -Severity ERROR -DiagnosticOnly -Message 'Cannot hide an error.' } 'Diagnostic-only annotation cannot suppress errors.'
+Complete-SfsuLogStep -Run $diagnostic -StepId access -Status Passed -Message 'Native command succeeded.'
+Start-SfsuLogStep -Run $diagnostic -StepId capture
+Complete-SfsuLogStep -Run $diagnostic -StepId capture -Status Passed -Message 'Verification passed.'
+Complete-SfsuLogRun -Run $diagnostic -Outcome Completed -Message 'Native success and verification passed.' | Out-Null
+Assert-True ((Read-Report $diagnostic).Contains('id="outcome">Completed</h2>') -and (Read-Report $diagnostic).Contains('! WARNING (diagnostic)') -and (Read-Report $diagnostic).Contains('retained printer diagnostic')) 'Completed reports keep labeled diagnostic warnings visible.'
+# Rebuild with a fresh journal cache to exercise persisted JSON, not just live dictionaries.
+$loggingModule=Get-Module Sfsu.Logging
+& $loggingModule { $script:JournalCache.Clear() }
+Update-SfsuLogReport -RunDirectory $diagnostic.RunDirectory | Out-Null
+Assert-True ((Read-Report $diagnostic).Contains('id="outcome">Completed</h2>') -and (Read-Report $diagnostic).Contains('! WARNING (diagnostic)')) 'Persisted diagnostic annotations survive report rebuild.'
 $failed = New-TestRun
 Start-SfsuLogStep -Run $failed -StepId access
 Write-SfsuCheckpoint -Run $failed -StepId access -Status Failed -Message 'Synthetic access failure.' -NextAction 'Check the destination.'

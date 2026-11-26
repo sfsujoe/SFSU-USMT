@@ -3,6 +3,7 @@ Import-Module (Join-Path $PSScriptRoot 'Sfsu.Inventory.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Sfsu.Appearance.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Sfsu.Engine.psm1') -Force
 . (Join-Path $PSScriptRoot 'Sfsu.Migration.Ui.ps1')
+. (Join-Path $PSScriptRoot 'Sfsu.Progress.Ui.ps1')
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
@@ -11,7 +12,7 @@ $script:SfsuUi = @{ Root=$packageRoot; Worker=$null; Pending=$null; Credential=$
     DirectoryLastUsedUtc=[DateTime]::MinValue; CredentialIdleMinutes=10
     ThemeId=$appearancePreference.ThemeId; TextScale=$appearancePreference.TextScale; PreferenceWarning=$appearancePreference.Warning; PreviewTheme=''; PreviewTextScale=0; Palette=$null; AppearanceSignature=''
     Dialogs=(New-Object 'Collections.Generic.List[Windows.Forms.Form]'); GridFontScale=0
-    MainLayout=[pscustomobject]@{Interactive=$false;Busy=$false;Signature=''}; MigrationControl=$null; ActiveRestorePlans=@(); CancellationDialogOpen=$false }
+    MainLayout=[pscustomobject]@{Interactive=$false;Busy=$false;Signature=''}; MigrationControl=$null; ActiveRestorePlans=@(); CancellationDialogOpen=$false; ProgressWindow=$null }
 
 function Request-SfsuUiCancellation([bool]$CloseWhenDone=$false) {
     if ($null -eq $script:SfsuUi.Worker -or $script:SfsuUi.CancellationDialogOpen) { return }
@@ -57,6 +58,7 @@ function Update-SfsuAppearance {
             }
         }
     }
+    Set-SfsuProgressWindowAppearance $script:SfsuUi.ProgressWindow
 }
 
 function Register-SfsuThemedDialog($Dialog) {
@@ -304,8 +306,15 @@ function Start-SfsuUiTask([string]$Action, [object[]]$Items=@()) {
     }
     [void]$worker.AddScript($task.ToString()).AddArgument($script:SfsuUi.Root).AddArgument($Action).AddArgument($Items).AddArgument($script:SfsuUi.Credential).AddArgument($LdapServer).AddArgument($script:SfsuUi.UseDirectory).AddArgument($script:SfsuUi.MigrationControl)
     $script:SfsuUi.Worker=$worker
-    try { $script:SfsuUi.Pending=$worker.BeginInvoke(); $script:SfsuUi.Timer.Start() }
-    catch { $worker.Dispose(); $script:SfsuUi.Worker=$null; $script:SfsuUi.Tabs.Enabled=$true; $script:SfsuUi.Cancel.Enabled=$false; throw }
+    try {
+        if ($Action -in @('Capture profiles','Restore backups')) { Show-SfsuMigrationProgressWindow $Action }
+        $script:SfsuUi.Pending=$worker.BeginInvoke(); $script:SfsuUi.Timer.Start()
+    }
+    catch {
+        $worker.Dispose(); $script:SfsuUi.Worker=$null; $script:SfsuUi.Tabs.Enabled=$true; $script:SfsuUi.Cancel.Enabled=$false
+        if ($Action -in @('Capture profiles','Restore backups')) { Update-SfsuMigrationProgressWindow $null Failed }
+        throw
+    }
 }
 
 function Set-SfsuAuthenticationFailure($State,[string]$Message) {
@@ -443,6 +452,19 @@ function Show-SfsuDirectoryCredentials {
     } finally { $dialog.Dispose() }
     if ($script:SfsuUi.Tabs.SelectedIndex -eq 0 -or -not $script:SfsuUi.UseDirectory) { Start-SfsuUiTask 'Discover profiles' }
     else { Start-SfsuUiTask 'Refresh current names' }
+}
+
+function Start-SfsuInitialUi {
+    $startup=Get-Variable SfsuStartupSignIn -Scope Script -ErrorAction SilentlyContinue
+    if ($null -eq $startup -or $null -eq $startup.Value) { Show-SfsuDirectoryCredentials; return }
+    $state=$startup.Value
+    if ($state.UseDirectory -and $null -ne $state.Credential) {
+        $script:SfsuUi.Credential=$state.Credential; $state.Credential=$null
+        $script:SfsuUi.UseDirectory=$true
+        $script:SfsuUi.DirectoryLastUsedUtc=[DateTime]::UtcNow
+    }
+    if ($state.ReportPath) { $script:SfsuUi.LatestReport=$state.ReportPath; $script:SfsuUi.Open.Enabled=$true }
+    Start-SfsuUiTask 'Discover profiles'
 }
 
 function Show-SfsuManualIdentity {
@@ -741,6 +763,11 @@ $timer.Add_Tick({
     if ($null -eq $script:SfsuUi.Pending) { return }
     if (-not $script:SfsuUi.Pending.IsCompleted) {
         $control=$script:SfsuUi.MigrationControl
+        if ($script:SfsuUi.Action -in @('Capture profiles','Restore backups')) {
+            $snapshot=$null; if ($control.ContainsKey('ProgressSnapshot')) { $snapshot=$control.ProgressSnapshot }
+            try { Update-SfsuMigrationProgressWindow $snapshot }
+            catch { $script:SfsuUi.Status.Text='The large progress display is unavailable. Migration continues; use the main status and report.' }
+        }
         if ($control -and $control.Message -and -not $script:SfsuUi.Cancelled) {
             $script:SfsuUi.Status.Text=$control.Message
             $script:SfsuUi.MigrationProgress.Visible=$true
@@ -750,13 +777,14 @@ $timer.Add_Tick({
         return
     }
     $script:SfsuUi.Timer.Stop()
-    $nextReviews=$null; $nextPlans=$null
+    $nextReviews=$null; $nextPlans=$null; $migrationOutcome='Failed'; $migrationReport=''
     try {
         $output=@($script:SfsuUi.Worker.EndInvoke($script:SfsuUi.Pending))
         if ($script:SfsuUi.Worker.HadErrors) { throw [string]$script:SfsuUi.Worker.Streams.Error[0] }
         if ($output.Count -eq 0) { throw 'The task ended without a result. Review Logs for an incomplete run.' }
         $result=$output[-1]
         $script:SfsuUi.LatestReport=$result.ReportPath; $script:SfsuUi.Open.Enabled=$true
+        if ($script:SfsuUi.Action -in @('Capture profiles','Restore backups')) { $migrationOutcome=$result.Outcome; $migrationReport=$result.ReportPath }
         switch ($script:SfsuUi.Action) {
             'Discover profiles' { Set-SfsuProfileRows @($result.Profiles); $script:SfsuUi.Status.Text="$(@($result.Profiles).Count) domain/local profile directories. Directory: $($result.DirectoryStatus). Check identities before backup." }
             'Prepare folders' {
@@ -777,9 +805,15 @@ $timer.Add_Tick({
             $latest=Get-ChildItem -LiteralPath $logRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
             if ($null -ne $latest -and (Test-Path -LiteralPath (Join-Path $latest.FullName 'report.html'))) {
                 $script:SfsuUi.LatestReport=Join-Path $latest.FullName 'report.html'; $script:SfsuUi.Open.Enabled=$true
+                if ($script:SfsuUi.Action -in @('Capture profiles','Restore backups') -and $script:SfsuUi.ProgressWindow -and $latest.CreationTimeUtc -ge $script:SfsuUi.ProgressWindow.Tag.Started.AddSeconds(-2)) { $migrationReport=$script:SfsuUi.LatestReport }
             }
         }
     } finally {
+        if ($script:SfsuUi.Action -in @('Capture profiles','Restore backups')) {
+            $snapshot=$null; if ($script:SfsuUi.MigrationControl.ContainsKey('ProgressSnapshot')) { $snapshot=$script:SfsuUi.MigrationControl.ProgressSnapshot }
+            try { Update-SfsuMigrationProgressWindow $snapshot $migrationOutcome $migrationReport }
+            catch { $script:SfsuUi.Status.Text='Migration result: '+$migrationOutcome+'. The progress window could not update; open the report.' }
+        }
         if ($script:SfsuUi.UseDirectory -and $script:SfsuUi.Action -in @('Discover profiles','Refresh current names')) { $script:SfsuUi.DirectoryLastUsedUtc=[DateTime]::UtcNow }
         $script:SfsuUi.Worker.Dispose(); $script:SfsuUi.Worker=$null; $script:SfsuUi.Pending=$null
         if ($script:SfsuUi.Action -eq 'Restore backups') { Clear-SfsuRestorePasswords $script:SfsuUi.ActiveRestorePlans; $script:SfsuUi.ActiveRestorePlans=@() }
@@ -801,8 +835,9 @@ $form.Add_FormClosing({
         Request-SfsuUiCancellation $true
     }
 })
-if (-not $BuildUiOnly) { $form.WindowState='Maximized'; $form.Add_Shown({ Show-SfsuDirectoryCredentials }) }
+if (-not $BuildUiOnly) { $form.WindowState='Maximized'; $form.Add_Shown({ Start-SfsuInitialUi }) }
 $form.Add_Disposed({
+    if ($null -ne $script:SfsuUi.ProgressWindow -and -not $script:SfsuUi.ProgressWindow.IsDisposed) { $script:SfsuUi.ProgressWindow.Tag.Running=$false; $script:SfsuUi.ProgressWindow.Dispose() }
     Clear-SfsuRestorePasswords $script:SfsuUi.ActiveRestorePlans
     $script:SfsuUi.Timer.Dispose()
     $script:SfsuUi.AppearanceTimer.Stop(); $script:SfsuUi.AppearanceTimer.Dispose()

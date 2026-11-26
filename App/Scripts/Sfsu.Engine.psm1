@@ -7,13 +7,14 @@ Import-Module (Join-Path $PSScriptRoot 'Sfsu.Inventory.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Sfsu.Launch.psm1')
 if (-not ('Sfsu.Engine.NativeRun' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'Sfsu.Engine.Native.cs') }
 Import-Module (Join-Path $PSScriptRoot 'Sfsu.Policy.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Sfsu.Progress.psm1')
 
 function Test-SfsuMigrationCancellation($Control) {
     if ($Control -and $Control.CancelRequested) { throw [OperationCanceledException]::new('The technician cancelled the operation. Partial stores/accounts/data are preserved; no rollback is implied.') }
 }
 
 function Set-SfsuMigrationProgress($Control,[string]$Message,[int]$Percent=-1) {
-    if ($Control) { $Control.Message=$Message; $Control.Percent=$Percent }
+    if ($Control) { $Control.Message=$Message; $Control.Percent=$Percent; Update-SfsuWorkflowNativeProgress $Control $Message $Percent }
 }
 
 function Get-SfsuMigrationHost {
@@ -149,6 +150,7 @@ function Get-SfsuNativeDiagnostics([string]$Log,[string]$Progress,[int]$ExitCode
         ExitCode=$ExitCode; ErrorLines=$errors; WarningLines=$warnings; NonFatalRecords=$nonfatal
         IgnoredErrors=$ignored; InformationalWarnings=$informational; UnavailableDiagnostics=$unavailable.ToArray()
         HasWarnings=($ExitCode -eq 3 -or $errors -gt 0 -or $warnings -gt 0 -or $nonfatal -gt 0 -or $ignored -gt 0 -or $unavailable.Count -gt 0)
+        HasOutcomeWarnings=($ExitCode -eq 3 -or $ignored -gt 0 -or $unavailable.Count -gt 0)
     }
 }
 
@@ -232,10 +234,16 @@ function Invoke-SfsuNativeTool {
         if ($file -and (Test-Path -LiteralPath $file)) { Add-SfsuRawLog -Run $Run -Name ([IO.Path]::GetFileName($file)) -StepId $StepId }
     }
     $diagnostics=Get-SfsuNativeDiagnostics $Log $Progress $code
-    if ($observationFailure) { $diagnostics.HasWarnings=$true }
+    if ($observationFailure) { $diagnostics.HasWarnings=$true; $diagnostics.HasOutcomeWarnings=$true }
     Write-SfsuLogEvent -Run $Run -StepId $StepId -Message ($Label+' native diagnostic summary.') -Details (ConvertTo-Json $diagnostics -Compress)
     if ($code -notin @(0,3) -or ($Name -eq 'usmtutils.exe' -and $code -ne 0)) { throw ($Label+' failed with USMT exit code '+$code+'. Review the original logs; dependent operations were stopped.') }
-    if ($diagnostics.HasWarnings) { Write-SfsuLogEvent -Run $Run -StepId $StepId -Severity WARNING -Message ($Label+' reported warnings/nonfatal errors. A completed command does not prove complete data migration.') -NextAction 'Review native logs and reconcile unavailable data before re-imaging.' }
+    if ($diagnostics.HasWarnings) {
+        if ($diagnostics.HasOutcomeWarnings) {
+            Write-SfsuLogEvent -Run $Run -StepId $StepId -Severity WARNING -Message ($Label+' reported a native warning result, ignored errors or unavailable required diagnostics.') -NextAction 'Review the native logs and required evidence.'
+        } else {
+            Write-SfsuLogEvent -Run $Run -StepId $StepId -Severity WARNING -DiagnosticOnly -Message ($Label+' succeeded with native diagnostic warnings retained for review.') -NextAction 'Review the native logs. These diagnostic messages do not change a successful result.'
+        }
+    }
     $diagnostics
 }
 
@@ -316,6 +324,7 @@ function Invoke-SfsuCapture {
     $paths=New-Object Collections.Generic.List[string]; $errors=New-Object Collections.Generic.List[string]
     $backups=New-Object Collections.Generic.List[object]; $active='preflight'; $outcome='Failed'; $current=$null
     try {
+        Initialize-SfsuWorkflowProgress $Control Backup @($Reviews | ForEach-Object { [string]$_.Profile.DisplayName })
         Start-SfsuLogStep $run preflight
         $hostInfo=Assert-SfsuMigrationHost Backup; $tools=Get-SfsuToolset $PackageRoot $hostInfo.Architecture
         $selected=@{}
@@ -329,6 +338,7 @@ function Invoke-SfsuCapture {
         $allProfiles=@(Get-CimInstance -ClassName Win32_UserProfile)
         foreach ($review in $Reviews) {
             Test-SfsuMigrationCancellation $Control; Assert-SfsuCaptureProfile $review.Profile; $index++
+            Set-SfsuWorkflowStage $Control Preparing $index 'Estimating profile size and preparing capture rules'
             $current=New-SfsuPreparedBackup -PackageRoot $PackageRoot -Profile $review.Profile -RunId $run.RunId
             $paths.Add($current.Path); $backups.Add($current)
             $current.Manifest.SchemaVersion=4; $current.Manifest.Status='Capturing'
@@ -349,7 +359,8 @@ function Invoke-SfsuCapture {
                 $genlog=Get-SfsuRawLogPath $run ($prefix+'-config.log')
                 $genargs=@(('/genconfig:'+$config),('/i:'+(Join-Path $policy 'MigApp.xml')),('/i:'+(Join-Path $policy 'MigDocs.xml')),('/i:'+(Join-Path $policy 'SfsuPolicy.xml')),('/l:'+$genlog),'/v:5')
                 $generated=Invoke-SfsuNativeTool -Tools $tools -Name scanstate.exe -Arguments $genargs -Run $run -StepId capture -Label 'Generate native component configuration' -Log $genlog -Control $Control
-                $planningWarnings=$generated.HasWarnings
+                $planningWarnings=$generated.HasOutcomeWarnings
+                $diagnosticWarnings=$generated.HasWarnings
                 $disabled=Set-SfsuGeneratedConfig $config
                 Test-SfsuMigrationRules $policy
                 $current.Manifest.Engine.PolicyFiles=@(foreach ($name in @('MigApp.xml','MigDocs.xml','SfsuPolicy.xml','Config.xml')) { [pscustomobject]@{Name=$name;Sha256=(Get-FileHash -LiteralPath (Join-Path $policy $name) -Algorithm SHA256).Hash} })
@@ -359,7 +370,9 @@ function Invoke-SfsuCapture {
                 $estimate=Get-SfsuRawLogPath $run ($prefix+'-estimate.xml'); $estlog=Get-SfsuRawLogPath $run ($prefix+'-estimate.log')
                 Set-SfsuMigrationProgress $Control ('Estimating '+$review.Profile.DisplayName)
                 $estimatedResult=Invoke-SfsuNativeTool -Tools $tools -Name scanstate.exe -Arguments (@($store)+$common+@(('/p:'+$estimate),('/l:'+$estlog))) -Run $run -StepId capture -Label 'Estimate capture size' -Log $estlog -Control $Control
-                $planningWarnings=$planningWarnings -or $estimatedResult.HasWarnings
+                $planningWarnings=$planningWarnings -or $estimatedResult.HasOutcomeWarnings
+                $diagnosticWarnings=$diagnosticWarnings -or $estimatedResult.HasWarnings
+                $current.Manifest.Engine['EstimatedStoreBytes']=0L
                 if (Test-Path -LiteralPath $estimate) {
                     Add-SfsuRawLog $run ([IO.Path]::GetFileName($estimate)) capture
                     $estimated=Read-SfsuStoreEstimate $estimate
@@ -369,21 +382,44 @@ function Invoke-SfsuCapture {
                     if ($estimated -gt 0 -and $free -lt [decimal]$estimated*1.1) { throw 'The destination lacks the native estimated store size plus a 10 percent working margin. Capture was not started.' }
                     if ($estimated -eq 0) { $planningWarnings=$true; Write-SfsuLogEvent -Run $run -StepId capture -Severity WARNING -Message 'USMT wrote an estimate but its size format was not recognized. The original estimate is retained; native disk-full handling still applies.' }
                 }
+                $current.Manifest.Engine['CaptureWarnings']=$planningWarnings
+                $current.Manifest.Engine['DiagnosticWarnings']=$diagnosticWarnings
+                Save-SfsuEngineManifest $current.Path $current.Manifest
+            } finally { $lease.Dispose() }
+        }
+        # Estimate every selected profile first so the batch denominator is
+        # stable before any capture percentage is shown.
+        Set-SfsuWorkflowWeights $Control @($backups | ForEach-Object { [double]$_.Manifest.Engine.EstimatedStoreBytes })
+        $index=0
+        foreach ($review in $Reviews) {
+            Test-SfsuMigrationCancellation $Control; Assert-SfsuCaptureProfile $review.Profile
+            $current=$backups[$index]; $index++; $prefix='p'+$index
+            Set-SfsuWorkflowStage $Control Transfer $index 'Capturing profile files and settings'
+            $lease=Enter-SfsuPathGuard $current.Path
+            try {
+                $policy=Join-Path $current.Path 'Policy'; $store=Join-Path $current.Path 'Store'
+                # Space may have changed since this profile's earlier estimate.
+                $free=Get-SfsuMigrationFreeSpace $current.Path; $estimated=$current.Manifest.Engine.EstimatedStoreBytes
+                if ($estimated -gt 0 -and $free -lt [decimal]$estimated*1.1) { throw 'The destination lacks the native estimated store size plus a 10 percent working margin. Capture was not started.' }
+                $common=@(Get-SfsuRuleArguments $policy)+@(Get-SfsuUserArguments $review.Profile.ProfileSid)+@('/efs:copyraw','/c','/r:2','/w:3','/v:5')
                 $log=Get-SfsuRawLogPath $run ($prefix+'-scanstate.log'); $progress=Get-SfsuRawLogPath $run ($prefix+'-scan-progress.log'); $list=Get-SfsuRawLogPath $run ($prefix+'-files.txt')
                 $captured=Invoke-SfsuNativeTool -Tools $tools -Name scanstate.exe -Arguments (@($store)+$common+@(('/l:'+$log),('/progress:'+$progress),('/listfiles:'+$list))) -Run $run -StepId capture -Label ('Capturing '+$review.Profile.DisplayName+' ('+$index+'/'+$Reviews.Count+')') -Log $log -Progress $progress -Control $Control
                 $current.Manifest.Engine.CaptureExitCode=$captured.ExitCode
-                $current.Manifest.Engine['CaptureWarnings']=($captured.HasWarnings -or $planningWarnings)
+                $current.Manifest.Engine['CaptureWarnings']=($captured.HasOutcomeWarnings -or $current.Manifest.Engine.CaptureWarnings)
+                $current.Manifest.Engine['DiagnosticWarnings']=($captured.HasWarnings -or $current.Manifest.Engine.DiagnosticWarnings)
                 $inclusion=Get-SfsuCaptureInclusion $list $review.Profile
                 $current.Manifest.Engine['Inclusion']=$inclusion
                 Add-SfsuRawLog $run ([IO.Path]::GetFileName($list)) capture
                 Write-SfsuCheckpoint -Run $run -StepId capture -Status Passed -Message ('Confirmed '+$inclusion.ProfileFileCount+' listed file(s) under the selected employee profile.') -Details (ConvertTo-Json $inclusion -Compress)
                 Save-SfsuEngineManifest $current.Path $current.Manifest
+                Complete-SfsuWorkflowStage $Control
             } finally { $lease.Dispose() }
         }
         Complete-SfsuLogStep $run capture Passed 'Native capture commands ended. Compressed-store verification follows.'
         $active='verify'; Start-SfsuLogStep $run verify; $index=0
         foreach ($current in $backups) {
             Test-SfsuMigrationCancellation $Control; $index++
+            Set-SfsuWorkflowStage $Control Verify $index 'Verifying captured backup'
             $store=Join-Path $current.Path 'Store/USMT/USMT.MIG'; [void](Assert-SfsuSafePath $store)
             $lease=Enter-SfsuPathGuard (Join-Path $current.Path 'Store'); $hold=$null
             try {
@@ -392,13 +428,17 @@ function Invoke-SfsuCapture {
                 $verified=Invoke-SfsuNativeTool -Tools $tools -Name usmtutils.exe -Arguments @('/verify:all',$store,('/l:'+$log)) -Run $run -StepId verify -Label ('Verify captured store '+$index) -Log $log -Control $Control
                 $current.Manifest.Engine.VerifyExitCode=$verified.ExitCode
                 $current.Manifest.Engine['StoreLength']=$hold.Length
-                $current.Manifest.Status='CapturedVerified'; if ($current.Manifest.Engine.CaptureWarnings -or $verified.HasWarnings) { $current.Manifest.Status='CapturedWithWarnings' }
+                $current.Manifest.Engine['DiagnosticWarnings']=($verified.HasWarnings -or $current.Manifest.Engine.DiagnosticWarnings)
+                $current.Manifest.Engine['OutcomeWarnings']=($current.Manifest.Engine.CaptureWarnings -or $verified.HasOutcomeWarnings)
+                $current.Manifest.Status='CapturedVerified'; if ($current.Manifest.Engine.OutcomeWarnings) { $current.Manifest.Status='CapturedWithWarnings' }
                 $current.Manifest.HasMigrationData=$true
                 Save-SfsuEngineManifest $current.Path $current.Manifest
                 Write-SfsuCheckpoint -Run $run -StepId verify -Status Passed -Message ($current.Path+': compressed catalog and files passed UsmtUtils /verify:all.')
+                Complete-SfsuWorkflowStage $Control
             } finally { if ($hold) { $hold.Dispose() }; $lease.Dispose() }
         }
         Complete-SfsuLogStep $run verify Passed 'Store verification ended; detailed evidence and limitations are retained.'
+        Set-SfsuWorkflowStage $Control Finalizing 0 'Finalizing reports'
         $outcome='Completed'
         if (@($backups | Where-Object { $_.Manifest.Status -eq 'CapturedWithWarnings' }).Count) { $outcome='CompletedWithWarnings' }
         Complete-SfsuLogRun $run Completed 'Capture finished; native results, profile-file inclusion and store-integrity checks are recorded.' | Out-Null
@@ -413,6 +453,7 @@ function Invoke-SfsuCapture {
     } finally {
         foreach ($path in $paths) { try { Export-SfsuLogSnapshot $run $path | Out-Null } catch { $errors.Add('Report snapshot could not be copied; retain the root Logs report.') } }
         Set-SfsuMigrationProgress $Control ('Capture '+$outcome)
+        Complete-SfsuWorkflowProgress $Control $outcome
     }
     [pscustomobject]@{Paths=$paths.ToArray();Errors=$errors.ToArray();Outcome=$outcome;ReportPath=$run.ReportPath;RunDirectory=$run.RunDirectory}
 }
@@ -469,6 +510,10 @@ function Get-SfsuRestorePlans {
             if ($seen.ContainsKey($key)) { throw 'Two selected backups target the same local account name.' }; $seen[$key]=$true
             if ($backup.PSObject.Properties['LocalOptions']) { $options=$backup.LocalOptions }
             if ($RequireOptions -and ($null -eq $options -or $options.Password -isnot [Security.SecureString] -or $options.Password.Length -eq 0 -or $options.Password.Length -gt 256 -or $options.Enabled -isnot [bool] -or $options.Administrator -isnot [bool])) { throw 'Each local account needs a password, explicit enabled state and Administrators-membership choice.' }
+            if ($RequireOptions) {
+                $passwordProblem=[Sfsu.Engine.LocalPasswords]::Validate($options.Password,$name,[string]$manifest.Identity.DisplayName)
+                if ($passwordProblem) { throw ('Local-account password check failed: '+$passwordProblem) }
+            }
         }
         $policy=Join-Path $path 'Policy'
         foreach ($file in $manifest.Engine.PolicyFiles) {
@@ -505,6 +550,12 @@ function Invoke-SfsuRestore {
         Start-SfsuLogStep $run preflight; Test-SfsuMigrationCancellation $Control
         $hostInfo=Assert-SfsuMigrationHost Restore; $tools=Get-SfsuToolset $PackageRoot $hostInfo.Architecture
         $plans=@(Get-SfsuRestorePlans -PackageRoot $PackageRoot -Backups $Backups -RequireOptions)
+        $sizes=@(foreach ($plan in $plans) {
+            $size=0.0
+            foreach ($field in @('EstimatedStoreBytes','StoreLength')) { if ($plan.Manifest.Engine.PSObject.Properties[$field] -and [double]$plan.Manifest.Engine.$field -gt 0) { $size=[double]$plan.Manifest.Engine.$field; break } }
+            $size
+        })
+        Initialize-SfsuWorkflowProgress $Control Restore @($plans | ForEach-Object { [string]$_.DisplayName }) $sizes
         foreach ($plan in $plans) { if ($plan.Manifest.Engine.ToolVersion -ne $tools.Version) { throw 'Use the same USMT build as capture; install the matching architecture payload before restore.' } }
         Complete-SfsuLogStep $run preflight Passed 'All selected targets and supplied account options passed. No account/data changes have occurred.'
         $active='verify'; Start-SfsuLogStep $run verify; $index=0
@@ -517,17 +568,21 @@ function Invoke-SfsuRestore {
         }
         foreach ($plan in $plans) {
             Test-SfsuMigrationCancellation $Control; $index++; $store=Join-Path $plan.Path 'Store/USMT/USMT.MIG'
+            Set-SfsuWorkflowStage $Control Verify $index 'Verifying source backup before restore'
             $log=Get-SfsuRawLogPath $run ('p'+$index+'-pre-restore-verify.log')
             $verified=Invoke-SfsuNativeTool -Tools $tools -Name usmtutils.exe -Arguments @('/verify:all',$store,('/l:'+$log)) -Run $run -StepId verify -Label ('Verify source store '+$index) -Log $log -Control $Control
-            if ($verified.HasWarnings) { $hasWarnings=$true }
+            if ($verified.HasOutcomeWarnings) { $hasWarnings=$true }
             if ($plan.Manifest.Status -eq 'CapturedWithWarnings') {
-                $hasWarnings=$true
-                Write-SfsuLogEvent -Run $run -StepId verify -Severity WARNING -Message 'This store was captured with operational warnings/nonfatal errors. The original diagnostics remain relevant.'
+                $diagnosticOnly=($plan.Manifest.Engine.CaptureExitCode -eq 0 -and $plan.Manifest.Engine.VerifyExitCode -eq 0)
+                if ($plan.Manifest.Engine.PSObject.Properties['OutcomeWarnings'] -and $plan.Manifest.Engine.OutcomeWarnings) { $diagnosticOnly=$false }
+                if (-not $diagnosticOnly) { $hasWarnings=$true }
+                Write-SfsuLogEvent -Run $run -StepId verify -Severity WARNING -DiagnosticOnly:$diagnosticOnly -Message 'This store was previously captured with warnings. The original diagnostics remain available.'
             }
             if (-not $plan.Manifest.Engine.PSObject.Properties['Inclusion']) {
                 $hasWarnings=$true
                 Write-SfsuLogEvent -Run $run -StepId verify -Severity WARNING -Message 'This older capture has no saved positive profile-file inclusion evidence. Store integrity alone cannot establish intended-user inclusion.'
             }
+            Complete-SfsuWorkflowStage $Control
         }
         Complete-SfsuLogStep $run verify Passed 'Every selected compressed store passed native verification before provisioning.'
         # Repeat all-target collision checks immediately before the first mutation.
@@ -536,6 +591,7 @@ function Invoke-SfsuRestore {
         $index=0
         foreach ($plan in $plans) {
             Test-SfsuMigrationCancellation $Control; $index++
+            Set-SfsuWorkflowStage $Control Transfer $index 'Restoring profile files and settings'
             $expected=$plan.ProfileSid
             if ($plan.AccountType -eq 'Local') {
                 Write-SfsuRestoreEvidence $run $plan AccountCreationRequested
@@ -554,14 +610,16 @@ function Invoke-SfsuRestore {
                 $arguments=@($store)+@(Get-SfsuRuleArguments $plan.PolicyDirectory)+@(Get-SfsuUserArguments $plan.ProfileSid)+@('/c','/r:2','/w:3','/v:5',('/l:'+$log),('/progress:'+$progress))
                 if ($plan.AccountType -eq 'Local') { $arguments+=('/mu:'+$plan.Manifest.SourceComputer+'\'+$plan.AccountName+':'+$env:COMPUTERNAME+'\'+$plan.AccountName) }
                 $applied=Invoke-SfsuNativeTool -Tools $tools -Name loadstate.exe -Arguments $arguments -Run $run -StepId apply -Label ('Restoring '+$plan.DisplayName+' ('+$index+'/'+$plans.Count+')') -Log $log -Progress $progress -Control $Control
-                if ($applied.HasWarnings) { $hasWarnings=$true }
+                if ($applied.HasOutcomeWarnings) { $hasWarnings=$true }
                 if (@(Get-SfsuDestinationProfiles | Where-Object SID -eq $expected).Count -ne 1) { throw 'LoadState exited but the intended destination profile registration was not found. Restore verification failed.' }
                 Write-SfsuRestoreEvidence $run $plan ProfileRegistrationConfirmed $expected
                 Write-SfsuCheckpoint -Run $run -StepId apply -Status Passed -Message ('Native apply ended and the intended destination SID/profile registration was found for '+$plan.DisplayName+'.')
+                Complete-SfsuWorkflowStage $Control
             } finally { if ($hold) { $hold.Dispose() }; $lease.Dispose() }
         }
         Complete-SfsuLogStep $run apply Passed 'Native restores ended and destination profile registrations were verified.'
         $active='accounts'; Start-SfsuLogStep $run accounts
+        Set-SfsuWorkflowStage $Control Finalizing 0 'Applying final account settings and preparing reports'
         foreach ($record in $created) {
             Test-SfsuMigrationCancellation $Control
             Set-SfsuRestoreAccountState $record.Plan $record.Sid
@@ -590,6 +648,7 @@ function Invoke-SfsuRestore {
         foreach ($guard in $storeGuards) { $guard.Dispose() }
         foreach ($plan in $plans) { try { Export-SfsuLogSnapshot $run $plan.Path | Out-Null } catch { $errors.Add('Report snapshot could not be copied; retain the root Logs report.') } }
         Set-SfsuMigrationProgress $Control ('Restore '+$outcome)
+        Complete-SfsuWorkflowProgress $Control $outcome
     }
     [pscustomobject]@{Outcome=$outcome;Errors=$errors.ToArray();ReportPath=$run.ReportPath;RunDirectory=$run.RunDirectory}
 }
